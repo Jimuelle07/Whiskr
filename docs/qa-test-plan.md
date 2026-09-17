@@ -171,7 +171,11 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
 - **Level:** integration
 - **Preconditions / controlled data:** three fixture users with `UserLocation` rows at 1 km, 4 km,
   and 8 km from a fixture report's coordinates; radius fixed at 5 km (BR-006 default).
-- **Steps:** create a `Listing` with `status: missing`; run the alert-fanout worker.
+- **Steps:** create a `Listing` with `status: missing` **via the normal submission path
+  (`gateListingWrite()`/API-003), not by calling the alert-fanout worker directly** — this is the
+  exact path `decision-ledger.md`'s 2026-09-18 fix targets (creation, not a status transition, is
+  the only way `missing` is ever reached per `frd.md` F-003's transition table); then let the
+  enqueued fanout job run.
 - **Expected (EARS):** WHEN a listing is created or updated to status `missing`, the system SHALL
   push a location-based alert to every user with location enabled within the configured radius and
   SHALL record that the alert was sent; the 1 km and 4 km users SHALL receive an `AlertDelivery`
@@ -410,10 +414,15 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
 - **Assertion (EARS unwanted):** the system SHALL NEVER publish a listing (scraped or manual) that
   lacks a visible link back to a real Facebook profile or page.
 - **Probe:** attempt to publish (a) a manual submission with `fb_profile_url` omitted, and (b) a
-  scraped post whose source page/profile link cannot be resolved (dead/removed link fixture).
+  scraped post whose source page/profile link cannot be resolved (dead/removed link fixture), run
+  as one item in a batch of three fixture scraped posts (one before it, one after).
 - **Expected:** in both cases, no `Listing` row is created and no feed-visible entry appears; the
   submission is rejected with a validation error, and the scraped post stays unlinked
-  (`ScrapedPost.listing_id = null`).
+  (`ScrapedPost.listing_id = null`); for (b), the ingest job does **not** crash or abort — the
+  fixture posts before and after the rejected one are still processed and produce their own
+  `Listing` rows normally (`decision-ledger.md`'s 2026-09-18 fix: a `ValidationError` from
+  `gateListingWrite()` inside `ingestScrapedPost()` must be caught and logged, never left to
+  propagate and kill the batch).
 - **Automation:** `backend/src/listings/__tests__/identity-anchor.test.ts` · `npm --prefix backend
   test -- listings/identity-anchor -t "INV-001"`.
 

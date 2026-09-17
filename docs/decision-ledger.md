@@ -52,6 +52,31 @@ architecture, tests, or task state; those stay in their canonical docs.
 
 ## 3. Pivots & decisions (newest first, append at top)
 
+### 2026-09-18 — F-004's alert trigger was wired to a function it could never reach (bug found and fixed)
+- **Type:** decision (a hole found during a third docs-completeness audit pass, not a pivot — no
+  prior stated design intended this)
+- **Change:** `technical-design.md` Algorithm 1b (`transitionStatus()`) was the only place that
+  called `createAlertAndFanout()`, firing on "`old_status != 'missing' and new_status ==
+  'missing'`." But `frd.md` F-003's own transition table has **no transition that lands on
+  `missing`** — every listing that is ever `missing` got there at *creation* (`kind = lost`),
+  never via a status transition. This means the alert trigger, as originally written, could never
+  fire for a single real submission — F-004, arguably the product's single most safety-critical
+  feature (a lost cat's owner depends on it), was dead on arrival in the design. The sequence
+  diagram already documented the correct behavior ("`Backend API -> Alerting worker: enqueue (if
+  status == missing)`" right after a manual submission) and `createBatchListings()` (Algorithm 5)
+  already called it correctly per cat — only the single-cat creation path (`gateListingWrite()`,
+  Algorithm 3, shared by both the manual and scraper pipelines) was missing the call. Fixed: added
+  the trigger to `gateListingWrite()`; kept `transitionStatus()`'s copy as intentional
+  forward-compatible dead code (PRD's F-004 EARS literally says "created **or updated**").
+- **Why it was found:** a systematic trace of "which code paths actually set `status = missing`"
+  against "which code paths call `createAlertAndFanout()`" during this audit, prompted by the
+  product owner asking for more holes after two rounds had already found real bugs.
+- **Alternatives rejected:** none — this is an unambiguous omission, not a design trade-off.
+- **Invalidated:** none — `qa-test-plan.md` TC-004 already exercised the *creation* path
+  correctly ("create a `Listing` with `status: missing`; run the alert-fanout worker"), so the test
+  itself needed no change; only the algorithm it was testing was wrong.
+- **Recorded as:** none — a straightforward correctness fix caught before any code existed.
+
 ### 2026-09-18 — F-102 promoted from Final to MVP and redefined: automated verification badge
 - **Type:** `zoom-in` (a Final-scope idea narrowed and pulled into MVP) plus a scope redefinition
 - **Change:** F-102 "Verified rescuer/page badge program (manual vetting)" (Final, post-MVP) →

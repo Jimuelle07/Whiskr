@@ -61,7 +61,10 @@ sweepStaleListings(now: timestamp, staleness_window: duration) -> int         # 
 
 # Location-based alerting (worker)
 createAlertAndFanout(listing: Listing) -> Optional[Alert]                     # Algorithm 2
-findOptedInUsersWithinRadius(lat, lng, radius_km) -> Iterator[User]
+findOptedInUsersWithinRadius(lat, lng) -> Iterator[User]   # FIXED 2026-09-18: dropped the
+    # radius_km param — it didn't match the 2-arg call site below, and per the resolved "radius
+    # source" design each recipient's own UserLocation.radius_km is the match distance, not a
+    # single global radius passed in
 fanoutJob(alert_id: uuid) -> None
 
 # Auth Service (Backend API) — added 2026-09-18, ADR-0001
@@ -103,15 +106,28 @@ ingestScrapedPost(post):
     # a false negative just yields two visible listings, cheaper than fuzzy-match false positives
     # silently collapsing two distinct real cats.
 
-    if original is not None and original.duplicate_of is None:
-        # collapse into the existing canonical listing
-        dup = gateListingWrite(ListingDraft(post, duplicate_of=original.id), actor=None)
-        ScrapedPost.insert(scrape_source_id=post.source_id, listing_id=dup.id,
-                            original_post_url=post.url, dedup_hash=dedup_hash)  # INV-003: URL kept
-        return  # no alert fanout for a duplicate row — see Algorithm 2 guard
+    # FIXED 2026-09-18 — both gateListingWrite() calls below previously had no error handling at
+    # all: a ValidationError (e.g. the post's profile/page link fails BR-008) would propagate
+    # uncaught out of this function, when "Error-handling strategy" (below) and FRD-F001's own
+    # Error handling table already documented the correct behavior as "reject before write, log
+    # source_post_url + reason, feed unaffected" — a graceful drop, never a crash of the ingest
+    # job. The two now match.
+    try:
+        if original is not None and original.duplicate_of is None:
+            # collapse into the existing canonical listing
+            dup = gateListingWrite(ListingDraft(post, duplicate_of=original.id), actor=None)
+            ScrapedPost.insert(scrape_source_id=post.source_id, listing_id=dup.id,
+                                original_post_url=post.url, dedup_hash=dedup_hash)  # INV-003: URL kept
+            return  # no alert fanout for a duplicate row — see Algorithm 2 guard
 
-    # no match: this becomes the canonical listing
-    canonical = gateListingWrite(ListingDraft(post, duplicate_of=None), actor=None)  # Algorithm 3
+        # no match: this becomes the canonical listing
+        canonical = gateListingWrite(ListingDraft(post, duplicate_of=None), actor=None)  # Algorithm 3
+    except ValidationError as e:
+        log(source_post_url=post.url, reason=e.reason)   # BR-008 gate failure or similar;
+        return                                             # no Listing/ScrapedPost row for this
+                                                             # post — nothing to roll back, feed
+                                                             # continues serving the last known-
+                                                             # good state (system-design.md)
     ScrapedPost.insert(scrape_source_id=post.source_id, listing_id=canonical.id,
                         original_post_url=post.url, dedup_hash=dedup_hash)
 ```
@@ -155,6 +171,12 @@ transitionStatus(listing_id, new_status, actor):
 
     if old_status != 'missing' and new_status == 'missing':
         createAlertAndFanout(listing)   # Algorithm 2, enqueued async — never blocks this call
+        # Note (2026-09-18): per the transition table above, no transition ever lands ON
+        # `missing` — it is reachable only at creation (see gateListingWrite's own trigger,
+        # Algorithm 3, which is the one that actually fires today). This branch is intentionally
+        # kept as defensive/forward-compatible code satisfying the PRD's literal F-004 EARS
+        # wording ("created OR UPDATED to status missing") in case a future BR change ever adds a
+        # transition back into `missing` — not dead code to delete, just currently unreachable.
     return listing
 
 isVisibleAsActive(listing):
@@ -206,9 +228,15 @@ fanoutJob(alert_id):
     alert   = SELECT Alert WHERE id = alert_id
     listing = SELECT Listing WHERE id = alert.listing_id
     for user in findOptedInUsersWithinRadius(listing.location_lat, listing.location_lng):
-        # geo query: UserLocation WHERE location_opt_in = true
-        #   AND ST_DWithin(point(lat,lng), point(listing.location_lat,listing.location_lng),
-        #                   user.radius_km)          -- see note below on radius source
+        # geo query: FIXED 2026-09-18 — previously read "UserLocation WHERE location_opt_in =
+        # true," but location_opt_in is a User column, not a UserLocation column
+        # (data-model.md); a query written that literally would fail (no such column). The
+        # correct gate is simpler: a UserLocation row's mere EXISTENCE already means opted-in,
+        # because API-013 (opt-out, added 2026-09-18) deletes the row entirely rather than
+        # flagging it — so no extra opt-in filter is needed at all:
+        #   SELECT User.id FROM UserLocation JOIN User ON UserLocation.user_id = User.id
+        #   WHERE ST_DWithin(point(lat,lng), point(listing.location_lat,listing.location_lng),
+        #                     UserLocation.radius_km)   -- see note below on radius source
         # paginated in batches (cursor over UserLocation) to bound memory in dense areas
         if AlertDelivery.exists(alert_id=alert.id, user_id=user.id):
             continue   # unique(alert_id, user_id) per data-model.md — idempotent on job retry
@@ -216,18 +244,28 @@ fanoutJob(alert_id):
                                          delivered_at=null, opened_at=null)
         for token in PushToken.where(user_id=user.id):
             try:
+                # payload_for() was referenced but never defined until this fix (2026-09-18) —
+                # shape per frd.md F-004 Outputs: title, body, deep link to the listing detail.
+                # payload_for(listing) -> { title: "A cat may be missing near you",
+                #                           body: listing.description[:140],
+                #                           deep_link: f"whiskr://listings/{listing.id}" }
+                #   -- [assumption]: exact copy and deep-link URL scheme are illustrative, not
+                #   sourced from any upstream doc; confirm at scaffold (mobile deep-link config).
                 pushProvider.send(token, payload_for(listing))
                 delivery.delivered_at = now(); delivery.save()
                 break   # one successful delivery per user is enough
             except PushProviderError as e:
                 log(e)   # never fails the job; retried/logged, per system-design
 ```
-**Open question (radius source):** `UserLocation.radius_km` (per-user opt-in preference) and
-`Alert.radius_km` (BR-006 default snapshot) are two distinct fields in `data-model.md`; this
-design uses the user's own `radius_km` as the match distance and treats `Alert.radius_km` as an
-audit snapshot of the default policy in effect at trigger time, not as the query parameter. This
-reconciliation is not explicit in `data-model.md` — flagged for the data-model owner to confirm,
-not asserted as fact.
+**Radius source — RESOLVED 2026-09-18:** `UserLocation.radius_km` (per-user opt-in preference) and
+`Alert.radius_km` (BR-006 default snapshot) are two distinct fields in `data-model.md`. This design
+confirms the reconciliation this doc previously only proposed: `UserLocation.radius_km` **is** the
+query parameter `fanoutJob()` matches against (fixed above, alongside the `findOptedInUsersWithinRadius`
+signature mismatch); `Alert.radius_km` is only ever an audit snapshot of the default policy in
+effect at trigger time, never read by the fanout query itself. Since `BR-006`'s radius isn't
+user-configurable at MVP (no UI to change it from the 5 km default), the two values are identical
+in practice today — this reconciliation only becomes behaviorally visible if/when radius
+customization ships post-MVP.
 
 Complexity: O(k) candidates within the geo index (`Listing`/`UserLocation` geo index per
 `data-model.md`) × O(tokens per user); batched to avoid unbounded memory on a dense radius query
@@ -281,6 +319,22 @@ gateListingWrite(draft, actor):
         if upload is not None:
             upload.consumed_at = now(); upload.save()   # BR-013: one photo, one listing
     commit transaction
+
+    if listing.status == 'missing':
+        createAlertAndFanout(listing)   # Algorithm 2, enqueued async — never blocks this call.
+        # FIXED 2026-09-18 — this call was missing here entirely, even though the sequence
+        # diagram below always documented it ("Backend API -> Alerting worker: enqueue (if
+        # status == missing)") and createBatchListings() (Algorithm 5) already had the
+        # equivalent per-cat call. Per the F-003 transition table, `missing` is reachable ONLY
+        # at creation — there is no transition INTO missing from any other status — which means
+        # transitionStatus()'s own alert trigger (Algorithm 1b, "if old_status != 'missing' and
+        # new_status == 'missing'") can never actually fire in practice: nothing ever transitions
+        # into missing, everything is CREATED at missing. Without this line, F-004 — the entire
+        # location-based alert feature, arguably the single most safety-critical part of the
+        # product (a lost cat's owner depends on it) — would never have fired for a single real
+        # submission. createAlertAndFanout()'s own `duplicate_of` guard already prevents a
+        # re-scraped duplicate from double-alerting, so this is safe to call unconditionally here
+        # for both the manual and scraper pipelines that share this one function.
     return listing
 ```
 Complexity: O(1) pattern check + one resolvability call per candidate write, plus one indexed
