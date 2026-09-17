@@ -85,6 +85,7 @@ alert urgently instead of relying on a general engagement feed**.
 - **F-003** — Status tagging (available / on hold / adopted / found) with stale-listing suppression → solves the staleness pain in §1
 - **F-004** — Location-based missing-cat alert pinned to an area, pushed to nearby users → solves the "buried within hours" urgency pain in §1
 - **F-005** — Every post requires a linked, visible Facebook profile as an identity anchor → solves the scam/trust risk raised during capture
+- **F-006** — A single report can include multiple cats found/lost together (a "batch" report), each becoming its own independently status-tracked listing → solves the common real-world case of a litter or group of cats found/lost as one event (added 2026-09-18, product-owner request; see `decision-ledger.md`)
 
 ### Final product — full vision
 - **F-101** — Photo-based matching suggestions between "lost" and "found" reports

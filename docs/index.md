@@ -23,7 +23,8 @@ links to the one canonical home for that content — nothing here restates anoth
 | Security · auth/authz · `INV-###` threat mitigations · the Facebook ToS/scraping compliance risk | [Security & Compliance](security-compliance.md) | *exposed_surface* |
 | Deploy · secrets · monitoring · incidents · recovery | [Ops](ops.md) | *outlives_demo*; scraper-block runbook lives here |
 | Release · GTM | [Release / GTM](release-gtm.md) | *release_planning* — no `market.md` sibling exists; grounded only in idea.md §5's own `[assumption]` figures |
-| Live execution state (`PH-##`, `TASK-###`, status, red/green evidence) | [Implementation Plan](implementation-plan.md) | *build_crew*; **Build approval is not yet recorded** — phase-5.4 has not started |
+| Live execution state (`PH-##`, `TASK-###`, status, red/green evidence) | [Implementation Plan](implementation-plan.md) | *build_crew*; **Build approval recorded 2026-09-18** (`Jimuelle07 · Solo Developer`) — phase-5.4 may begin |
+| Architecture decision records (hard-to-reverse, product-level choices) | [docs/adr/](adr/) | distinct from `box/*/adr` (framework-internal); `ADR-0001` (Facebook-OAuth-only auth) is the first entry |
 | Build-time agent roster | [Crew](crew.md) | *build_crew*; every agent bound to a Claude model — no OpenAI/Codex model is reachable in this environment |
 | Guides and sensors (what steers, what catches) | [Harness](harness.md) | *build_crew*; several sensors (test commands) are not live yet — task 1 creates them |
 | Decisions · pivots · rejected choices · immutable IDs · `INV` audits | [Decision Ledger](decision-ledger.md) | append-only |
@@ -61,7 +62,8 @@ links to the one canonical home for that content — nothing here restates anoth
 - [x] No doc restates a fact owned by another (§0 respected) — spot-checked during phase-5.1/5.2.
 - [x] Every exposed surface declares auth/authz — `security-compliance.md`.
 - [x] Validation report verdict is `PASS`.
-- [x] `check-implementation-plan.py docs/implementation-plan.md --strict` → **APPROVE** (4 phases, 14 tasks).
+- [x] `check-implementation-plan.py docs/implementation-plan.md --strict` → **APPROVE** (5 phases, 15 tasks).
+- [x] `trace-ids.py docs --seed docs/seed` → **APPROVE**, no dangling refs, no unused-definition warnings (2026-09-18 re-run).
 - [x] `.claude/agents/*.md` match `crew.md` — pending materialization (see below).
-- [ ] **Build approval recorded** — the one item left before phase-5.4 (code) may begin. Not yet done.
-- [!] Known, deliberately-not-yet-resolved gaps: no `docs/seed/brand.md` (visual identity) or `docs/seed/market.md` (real market research) sibling exists; `API-005`/`API-006` have no dedicated `TC-###` (both cite `TC-004`); `UserLocation.radius_km` vs `Alert.radius_km` duplication in the data model (inert at MVP — radius isn't configurable yet, per `BR-006`).
+- [x] **Build approval recorded** — `Jimuelle07 · Solo Developer · 2026-09-18`. Phase-5.4 (code) may begin.
+- [!] Known, deliberately-not-yet-resolved gaps: no `docs/seed/brand.md` (visual identity) or `docs/seed/market.md` (real market research) sibling exists; `API-005`/`API-006` have no dedicated `TC-###` (both cite `TC-004`); `UserLocation.radius_km` vs `Alert.radius_km` duplication in the data model (inert at MVP — radius isn't configurable yet, per `BR-006`); Facebook Graph API `debug_token` app-id verification (`security-compliance.md` T-010) not yet confirmed as implemented.

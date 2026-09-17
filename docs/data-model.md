@@ -8,6 +8,9 @@
  User ──1───N── Listing            (submitted_by; nullable for scraped listings)
  User ──1───1── UserLocation        (opt-in radius subscription, for F-004/UJ-003)
  User ──1───N── PushToken           (a user may have multiple devices)
+ User ──1───N── ReportBatch         (submitted_by; F-006 multi-cat batch reports)
+
+ ReportBatch ──1───N── Listing      (batch_id, nullable; F-006 grouping reference, no lifecycle of its own)
 
  Listing ──1───1── FacebookAnchor   (identity anchor; INV-001/F-005/BR-002/BR-008)
  Listing ──1───N── StatusHistory    (every transition; enforces/audits INV-002)
@@ -31,12 +34,28 @@ so status/staleness/alerting logic (F-003, F-004, INV-002) is never duplicated a
 | Field | Type | Null? | Default | Description |
 |-------|------|-------|---------|-------------|
 | id | uuid | no | generated | Primary key |
-| display_name | text | no | — | Shown alongside listings the user submitted |
-| auth_identifier | text | no | — | **[assumption]** — phone/email/OAuth identifier; auth mechanism not specified in seed, to confirm at scaffold |
+| display_name | text | no | — | Shown alongside listings the user submitted; sourced from Facebook at signup, user-editable thereafter (BR-010, UJ-006, API-009) |
+| fb_user_id | text | no | — | Facebook-issued user id from OAuth (`ADR-0001`); unique per account; resolves the prior `[assumption]` `auth_identifier` field, which is removed |
 | location_opt_in | boolean | no | false | Gate for UJ-002/UJ-003 location features |
-| is_admin | boolean | no | false | BR-004/INV-002 gate — who may change another submitter's status; provisioning is `[assumption]`, no admin model in seed |
+| is_admin | boolean | no | false | BR-004/INV-002 gate — who may change another submitter's status; provisioning is `[assumption]`, no admin model in seed; never settable via any user-facing endpoint (BR-010) |
 | created_at | timestamp | no | now() | |
 | updated_at | timestamp | no | now() | |
+
+**No Facebook access/refresh token field exists on this table.** Per `ADR-0001`, the token the
+client presents at login is verified against the Graph API once and then discarded — Whiskr never
+persists a long-lived Facebook credential, which keeps `PushToken.token`-style secret-handling scope
+from also applying here.
+
+### ReportBatch
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| submitted_by | uuid (FK → User.id) | no | — | The user who submitted the batch (F-006) |
+| created_at | timestamp | no | now() | |
+
+A thin grouping reference only — no `status`, no lifecycle, never mutated after creation. Each cat
+in the batch is an independent `Listing` row (see below); `ReportBatch` exists solely so the client
+can fetch "every cat reported together" without inferring it from timestamps.
 
 ### UserLocation
 | Field | Type | Null? | Default | Description |
@@ -72,6 +91,7 @@ so status/staleness/alerting logic (F-003, F-004, INV-002) is never duplicated a
 | location_label | text | yes | null | Free-text address/area label shown in UI |
 | is_stale | boolean | no | false | Set by the staleness sweep (BR-005); does **not** mutate `status` — keeps INV-002 (explicit resolution) distinct from time-based suppression |
 | duplicate_of | uuid (FK → Listing.id) | yes | null | Self-reference; set when the dedup match (F-001) collapses a re-scraped post into an existing listing |
+| batch_id | uuid (FK → ReportBatch.id) | yes | null | Set when this listing was created as part of a multi-cat batch report (F-006); null for single-cat submissions and all scraped listings |
 | resolved_at | timestamp | yes | null | Set only on an explicit BR-004 status transition to `resolved`/`adopted`/`found` |
 | resolved_by | uuid (FK → User.id) | yes | null | Submitter or admin who resolved it (BR-004) |
 | created_at | timestamp | no | now() | |
@@ -148,18 +168,22 @@ so status/staleness/alerting logic (F-003, F-004, INV-002) is never duplicated a
 - `ScrapedPost.dedup_hash` — index for the F-001 dedup match on ingest.
 - `ScrapeSource.fb_page_or_group_url` — unique (one row per configured source).
 - `AlertDelivery(alert_id, user_id)` — unique (no duplicate delivery record per user per alert).
+- `User.fb_user_id` — unique (one Whiskr account per Facebook identity).
+- `Listing(batch_id)` — index for the "fetch every cat in this batch" read (F-006).
 - Foreign keys: `Listing.submitted_by → User.id`, `Listing.resolved_by → User.id`,
-  `Listing.duplicate_of → Listing.id` (self-referential, nullable), `FacebookAnchor.listing_id →
-  Listing.id`, `ScrapedPost.listing_id → Listing.id`, `ScrapedPost.scrape_source_id →
-  ScrapeSource.id`, `StatusHistory.listing_id → Listing.id`, `Alert.listing_id → Listing.id`,
-  `AlertDelivery.alert_id → Alert.id`, `AlertDelivery.user_id → User.id`, `UserLocation.user_id →
-  User.id`, `PushToken.user_id → User.id`.
+  `Listing.duplicate_of → Listing.id` (self-referential, nullable), `Listing.batch_id →
+  ReportBatch.id` (nullable), `FacebookAnchor.listing_id → Listing.id`, `ScrapedPost.listing_id →
+  Listing.id`, `ScrapedPost.scrape_source_id → ScrapeSource.id`, `StatusHistory.listing_id →
+  Listing.id`, `Alert.listing_id → Listing.id`, `AlertDelivery.alert_id → Alert.id`,
+  `AlertDelivery.user_id → User.id`, `UserLocation.user_id → User.id`, `PushToken.user_id →
+  User.id`, `ReportBatch.submitted_by → User.id`.
 
 ## Retention & privacy classification
-- **User.auth_identifier** — PII. Retention: life of the account; deleted on account deletion
-  request. **[assumption]** — no data-retention policy is stated in the seed; this follows standard
-  practice, to confirm with product owner/legal at scaffold (a `security-compliance.md` doc is not
-  in this generation batch but would own this formally when `exposed_surface: true` is acted on).
+- **User.fb_user_id** — PII. Retention: life of the account; deleted on account-deletion request.
+  No Facebook access/refresh token is ever persisted at all (verify-then-discard at login,
+  `ADR-0001`), reducing the secret-handling surface to zero long-lived Facebook credentials.
+  **[assumption]** — no data-retention policy beyond "life of account" is stated in the seed; this
+  follows standard practice, to confirm with product owner/legal at scaffold.
 - **Listing.location_lat/lng, location_label** — PII-adjacent (can reveal a submitter's approximate
   home/found location). Classification: internal; visible to app users by product design (the
   location is the point of the listing), but precise-enough-to-dox precision should be reviewed —
@@ -188,3 +212,7 @@ so status/staleness/alerting logic (F-003, F-004, INV-002) is never duplicated a
 - Any schema change to `Listing.status`'s enum or to `StatusHistory`'s append-only guarantee is a
   change to INV-002 enforcement and must be treated as a logged pivot (per `idea.md` §9 note on
   invariants), not a routine migration.
+- `ReportBatch` and `Listing.batch_id` (F-006, added 2026-09-18) are additive: a new table plus one
+  new nullable FK column on the existing `Listing` table, no breaking change to any existing row or
+  query. `User.fb_user_id` replaces the never-implemented `auth_identifier` column outright (no
+  greenfield data existed to migrate, per `ADR-0001`).

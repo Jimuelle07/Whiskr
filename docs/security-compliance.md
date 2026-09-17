@@ -9,7 +9,7 @@
 
 | Field | Classification | Notes |
 |---|---|---|
-| `User.auth_identifier` | PII | Retention: life of account, deleted on account-deletion request — **[assumption]**, no retention policy stated in seed |
+| `User.fb_user_id` | PII | Retention: life of account, deleted on account-deletion request; no Facebook access/refresh token is ever persisted (verify-then-discard at login, `ADR-0001`) |
 | `Listing.location_lat/lng`, `location_label` | PII-adjacent | Internal; visible to app users by product design (the location *is* the listing's point) — precision/fuzzing rule is **[assumption]**, not specified in seed |
 | `UserLocation.lat/lng` | PII | Used only for radius matching (F-004); **not shown to other users**; retained until opt-out/account deletion |
 | `PushToken.token` | Secret-adjacent | Device push credential; not human-readable but treated as sensitive; retained until device unregisters/token rotates |
@@ -20,13 +20,15 @@
 
 ## Authn / authz model
 
-- **Identity establishment.** `User.auth_identifier` is the anchor for a Whiskr account
-  (phone/email/OAuth) — **[assumption]**: the seed does not name a mechanism or provider; the
-  concrete auth provider/protocol is undecided and must be confirmed at scaffold.
-- **Session mechanism** — **[assumption]**: no token/session scheme (JWT, opaque session token,
-  etc.) is named in the seed. Whatever is chosen must be validated on every Backend API call per
-  system-design's rule that the Backend API is the sole rule-enforcement point (client version must
-  never matter).
+- **Identity establishment.** Facebook OAuth is the sole account mechanism (`ADR-0001`, resolved
+  2026-09-18) — the client obtains a Facebook access token via the on-device SDK; the backend
+  verifies it against the Graph API and upserts `User` by `fb_user_id`. No password exists on
+  Whiskr's side, so there is no forgot-password flow and no password-reset attack surface
+  (credential stuffing, reset-token leakage) to defend.
+- **Session mechanism** — **[assumption]** retained: no token/session scheme (JWT, opaque session
+  token, etc.) for Whiskr's own bearer token is named in the seed. Whatever is chosen must be
+  validated on every Backend API call per system-design's rule that the Backend API is the sole
+  rule-enforcement point (client version must never matter).
 - **Authorization surface**, derived from system-design + data-model without inventing new
   architecture:
   - **Read (feed browse/filter/search, F-001/F-003)** — no auth requirement is stated anywhere in
@@ -48,9 +50,9 @@
     mechanism (API key, mTLS, etc.) is named in the seed; flagged as missing, not silently assumed
     away, per the architect role's "any network-exposed surface: design auth/authz explicitly or
     flag it" rule.
-- **Open question:** no auth mechanism, session lifetime, or admin-provisioning process is
-  specified anywhere upstream (`idea.md`, `system-design.md`, `data-model.md` all flag this
-  independently as `[assumption]`). This is the single largest security gap in the current doc set.
+- **Open question:** the auth *mechanism* is now resolved (Facebook OAuth, `ADR-0001`); session
+  lifetime/token format and admin-provisioning process remain unspecified anywhere upstream — the
+  largest remaining security gap in the current doc set is narrower than before, not closed.
 
 ## Threat model
 
@@ -65,6 +67,8 @@
 | T-007 | Tampering / Info disclosure | A normalization bug drops `ScrapedPost.original_post_url` or its rendering | Republished content with no attribution back to the original poster | `original_post_url` is NOT NULL at the schema level; no UI path may render scraped content without the link — **[gap]**: no automated check enforces the *UI* half of this today | INV-003 |
 | T-008 | Elevation of privilege | User sets `is_admin = true` on their own account, or forges an admin-only status transition | Unauthorized resolve/override power over any listing | `is_admin` must not be mutable via any user-facing endpoint; provisioning path is **[assumption]**, undecided — flagged as an open gate, not resolved | BR-004, INV-002 |
 | T-009 | Denial of service / availability | Facebook blocks, rate-limits, or structurally changes pages/groups the scraper polls | Ingestion pipeline (F-001) degrades or stops; feed coverage drops | `ScrapeSource.status` (active/degraded/blocked) is the operational signal; F-002 manual submission is the designed fallback — **this threat is also a named regulatory/kill-criterion risk, treated in its own subsection below, not only here** | Technical kill criterion (`idea.md` §9); see Compliance obligations |
+| T-010 | Spoofing | An attacker replays a Facebook access token obtained for a *different* app (not Whiskr's own Facebook App ID) to log into Whiskr as that Facebook user | Account takeover without the victim ever touching Whiskr | Verify the token's `app_id` via Facebook's `debug_token` endpoint before trusting `fb_user_id` — **[gap]**, not yet confirmed as implemented; flagged in `api-spec.md` API-007 Open questions; guarded by `qa-test-plan.md` TC-008 | `ADR-0001` auth mechanism |
+| T-011 | Denial of service / abuse | A user submits many fake multi-cat batch reports (F-006, API-010) to spam the feed/alert channel, each call producing N listings for the cost of one request | Feed/alert-fanout spam at N-times the cost of a single-cat submission per request | Same per-user write-rate-limit gap already named for API-003/API-004 (Rate limits, `api-spec.md`) now explicitly extends to API-010 at N-times weight — not a new gap, but a heavier instance of the existing one, worth naming now that F-006 exists | F-006 |
 
 ## Abuse & safety-specific risks (ethical)
 
@@ -137,8 +141,12 @@ flags it as "the single most consequential, hardest-to-reverse choice in this do
   (system-design). Referenced via environment/secret store, never inlined.
 - **Database credentials** for the shared relational store — referenced via secret store; no value
   belongs in any doc or repo.
-- **Session/auth-signing secret** — depends entirely on the undecided auth mechanism above
-  (**[assumption]**); whatever is chosen, the signing key must be rotated and never inlined.
+- **Session/auth-signing secret** — the auth *mechanism* is resolved (Facebook OAuth, `ADR-0001`),
+  but the signing key for Whiskr's own issued bearer token is still `[assumption]` (format/algorithm
+  undecided); whatever is chosen, the signing key must be rotated and never inlined.
+- **Facebook App Secret** — used server-side if the chosen Graph API verification call requires it
+  (e.g., an app-access-token for the `debug_token` check, T-010) — referenced via secret store,
+  never inlined; distinct from any per-user Facebook access token, which is never persisted at all.
 - **Service credential for scraper → Backend API** (see Authn/authz gap, T-009 context) — currently
   undesigned; flagged, not invented here.
 - No secret value is ever written into this document or any doc in this set.
@@ -153,10 +161,11 @@ flags it as "the single most consequential, hardest-to-reverse choice in this do
   audit marker, not just a data field.
 - **`ScrapedPost.raw_content_snapshot`** is retained for dedup/audit only, never surfaced verbatim
   in the UI beyond the original link (INV-003).
-- **Must NOT be logged in plaintext, ever:** `PushToken.token`, `User.auth_identifier`, precise
-  `UserLocation.lat/lng` outside the server-side radius-match code path. General application logs
-  must not carry these fields — this is a requirement on the eventual implementation, not yet a
-  verified property of any code.
+- **Must NOT be logged in plaintext, ever:** `PushToken.token`, `User.fb_user_id`, the client-supplied
+  `fb_access_token` at login (verified once, never persisted or logged), precise `UserLocation.lat/lng`
+  outside the server-side radius-match code path. General application logs must not carry these
+  fields — this is a requirement on the eventual implementation, not yet a verified property of any
+  code.
 
 ## Incident response basics
 
@@ -189,3 +198,5 @@ flags it as "the single most consequential, hardest-to-reverse choice in this do
       the Facebook ToS/scraping kill-criterion gate — before any public-facing milestone. — {date}
 - [ ] No API response (feed, listing detail, or any other read path) returns `PushToken.token` or
       `UserLocation.lat/lng`. — {date}
+- [ ] No Facebook user access/refresh token is ever persisted (verify-then-discard only at login,
+      `ADR-0001`). — {date}

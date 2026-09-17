@@ -37,8 +37,10 @@ the named task lands it, per Build-First.
 
 ## Scope
 ### In scope
-- All five MVP features (F-001..F-005) and all three invariants (INV-001..INV-003).
+- All six MVP features (F-001..F-006) and all three invariants (INV-001..INV-003).
 - UJ-001 as the core e2e smoke (the flow `usability.md` cleared and A-001 depends on).
+- Facebook OAuth login/signup (API-007, `ADR-0001`) as concrete, testable infra now that the auth
+  mechanism is resolved — no longer an `[assumption]` with nothing to test.
 
 ### Out of scope
 - F-101..F-104 (final-product features) — not built at MVP; carried in the traceability matrix
@@ -66,6 +68,7 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
 | F-003 | Status tagging + stale suppression | TC-003, TC-003b | unit | planned | not yet |
 | F-004 | Location-based missing-cat alert | TC-004 | integration | planned | not yet |
 | F-005 | Facebook profile identity anchor | TC-005 | unit | planned | not yet |
+| F-006 | Multi-cat batch report | TC-006 | integration | planned | not yet |
 | F-101 | Photo-based lost/found matching | TC-101 | e2e | deferred — post-MVP, not scaffolded | N/A |
 | F-102 | Verified rescuer/page badge program | TC-102 | integration | deferred — post-MVP, not scaffolded | N/A |
 | F-103 | In-app messaging | TC-103 | e2e | deferred — post-MVP, not scaffolded | N/A |
@@ -82,6 +85,9 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
 | TC-003b | unit + Jest | `backend/src/status/__tests__/staleness.test.ts` | `npm --prefix backend test -- status/staleness` | task | stdout / Jest report |
 | TC-004 | integration + Jest | `backend/src/alerts/__tests__/geofence.integration.test.ts` | `npm --prefix backend test -- alerts/geofence.integration` | task | stdout / Jest report |
 | TC-005 | unit + Jest | `backend/src/listings/__tests__/identity-anchor.test.ts` | `npm --prefix backend test -- listings/identity-anchor` | task | stdout / Jest report |
+| TC-006 | integration + Jest + supertest | `backend/src/reports/__tests__/batch.integration.test.ts` | `npm --prefix backend test -- reports/batch.integration` | task | stdout / Jest report |
+| TC-007 | integration + Jest + supertest | `backend/src/auth/__tests__/facebook-login.integration.test.ts` | `npm --prefix backend test -- auth/facebook-login.integration` | task | stdout / Jest report |
+| TC-008 | unit + Jest | `backend/src/auth/__tests__/facebook-token-verify.test.ts` | `npm --prefix backend test -- auth/facebook-token-verify -t "T-010"` | task | stdout / Jest report |
 | TC-101 | e2e (deferred) | `mobile/e2e/photo-match.e2e.ts` (not yet created) | `npm --prefix mobile run e2e -- photo-match` | post-MVP phase | N/A — not scaffolded |
 | TC-102 | integration (deferred) | `backend/src/badges/__tests__/verify.integration.test.ts` (not yet created) | `npm --prefix backend test -- badges/verify.integration` | post-MVP phase | N/A — not scaffolded |
 | TC-103 | e2e (deferred) | `mobile/e2e/messaging.e2e.ts` (not yet created) | `npm --prefix mobile run e2e -- messaging` | post-MVP phase | N/A — not scaffolded |
@@ -167,6 +173,44 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
   the system SHALL refuse to publish it to the feed.
 - **Automation:** `backend/src/listings/__tests__/identity-anchor.test.ts` · `npm --prefix backend
   test -- listings/identity-anchor` · red on current codebase.
+
+### TC-006 — batch report creates N independently tracked listings sharing one batch id
+- **Covers:** F-006
+- **Level:** integration
+- **Preconditions / controlled data:** an authenticated test user; a payload with one
+  `fb_profile_url` and 3 cat entries, each independently BR-001-complete.
+- **Steps:** POST the batch to `/listings/batch`; then GET the feed and each returned listing's
+  detail.
+- **Expected (EARS):** WHEN a user submits a batch report with 2 or more cats, each satisfying
+  BR-001, and one shared attached Facebook profile, the system SHALL create one independently
+  status-tracked listing per cat, all linked to a single batch reference, visible in the feed within
+  the same session.
+- **Automation:** `backend/src/reports/__tests__/batch.integration.test.ts` · `npm --prefix backend
+  test -- reports/batch.integration` · red on current codebase (no batch endpoint exists yet).
+
+### TC-007 — Facebook OAuth login creates/reuses an account and issues a session
+- **Covers:** API-007 (`ADR-0001` auth substrate)
+- **Level:** integration
+- **Preconditions / controlled data:** a fixture valid Facebook access token (stubbed Graph API
+  response) resolving to an `fb_user_id` not yet present in the data store.
+- **Steps:** POST the token to `/auth/facebook` twice (first call = signup, second call = login).
+- **Expected:** the first call returns `201` with a new `User`; the second call returns `200`
+  reusing the same `User.id` — no duplicate account is ever created for the same `fb_user_id`.
+- **Automation:** `backend/src/auth/__tests__/facebook-login.integration.test.ts` · `npm --prefix
+  backend test -- auth/facebook-login.integration` · red on current codebase (no auth endpoint
+  exists yet).
+
+### TC-008 — a Facebook token issued for a different app is rejected (T-010)
+- **Covers:** `security-compliance.md` T-010 (security hardening, not a product `INV-###`, so this
+  is a regular `TC-###`, not a `TC-N##`)
+- **Level:** unit
+- **Preconditions / controlled data:** a fixture Facebook token whose stubbed `debug_token` response
+  reports an `app_id` different from Whiskr's own configured Facebook App ID.
+- **Steps:** run the token-verification function against the fixture.
+- **Expected:** verification fails with a distinct "wrong app" reason; no `User` row is created or
+  reused.
+- **Automation:** `backend/src/auth/__tests__/facebook-token-verify.test.ts` · `npm --prefix backend
+  test -- auth/facebook-token-verify -t "T-010"` · red on current codebase.
 
 ### TC-101 — photo-based match suggestion (deferred, post-MVP)
 - **Covers:** F-101
@@ -260,7 +304,7 @@ One EARS criterion per F-### is stated in `docs/prd.md` "Acceptance criteria" se
 - **Before demo:** full gate + UJ-001 core smoke, green, on the commit being demoed.
 
 ## Exit criteria
-- Every MVP `F-###` (F-001..F-005) has its `TC-###` passing on the default branch.
+- Every MVP `F-###` (F-001..F-006) has its `TC-###` passing on the default branch.
 - Every `INV-###` (INV-001..INV-003) has its `TC-N##` passing on the default branch.
 - UJ-001 core smoke e2e green on the commit being demoed.
 - No invented pass-rate target beyond "all listed cases green" — no defect-count/severity budget is

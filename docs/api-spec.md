@@ -8,11 +8,12 @@
 
 The Backend API is the single contract boundary the Mobile Client (iOS + Android) depends on
 (`system-design.md` — "Backend API ... exposes_api: true"). It owns listing read/search/filter
-(F-001), submission intake (F-002), status transitions (F-003/INV-002), location-based alert
-subscription and push-token registration (F-004), and the identity anchor / account layer that
-F-005 and INV-001 depend on. The scraper and alerting workers write to the same data store through
-this API's listing-write path (`system-design.md` — "both pipelines converge on the same `Listing`
-write path"); this spec covers the mobile-facing surface only.
+(F-001), submission intake (F-002), multi-cat batch submission (F-006), status transitions
+(F-003/INV-002), location-based alert subscription and push-token registration (F-004), the
+identity anchor / account layer that F-005 and INV-001 depend on, and Facebook-OAuth account
+login/signup and profile management (`ADR-0001`). The scraper and alerting workers write to the
+same data store through this API's listing-write path (`system-design.md` — "both pipelines
+converge on the same `Listing` write path"); this spec covers the mobile-facing surface only.
 
 - **Base URL / namespace:** `[assumption]` — no domain/host is named in the seed; proposed
   `https://api.whiskr.app/v1` pending the deployment topology decision in `system-design.md`.
@@ -23,11 +24,11 @@ write path"); this spec covers the mobile-facing surface only.
 
 ## Authentication & authorization
 
-- **Mechanism:** `[assumption]` — `data-model.md`'s `User.auth_identifier` is itself flagged
-  `[assumption]` ("phone/email/OAuth identifier; auth mechanism not specified in seed"). This spec
-  assumes a bearer-token session issued by API-007 and sent as `Authorization: Bearer <token>` on
-  every authenticated call. The identifier scheme (phone OTP vs. email vs. OAuth) is unresolved —
-  see Open questions.
+- **Mechanism:** Facebook OAuth (`ADR-0001`, resolved 2026-09-18) — the Mobile Client obtains a
+  short-lived Facebook access token via the on-device Facebook Login SDK, then exchanges it at
+  API-007 for a Whiskr-issued bearer session token, sent as `Authorization: Bearer <token>` on every
+  authenticated call thereafter. There is no app-side password and no forgot-password flow — a
+  direct, intentional consequence of this decision, not a gap.
 - **Public (no auth) endpoints:** API-001, API-002 — the feed must be browsable without an account,
   consistent with `system-design.md`'s "feed still browsable without location permission" (device
   location and account auth are separate gates; browsing needs neither). `[assumption]` — the seed
@@ -149,36 +150,70 @@ write path"); this spec covers the mobile-facing surface only.
 - **Auth:** Bearer required; writes `PushToken.user_id` = caller.
 - **Errors:** `400` missing/invalid `platform`; `401`.
 
-### API-007 — POST /auth/sessions — Authenticate / create account
-- **Serves:** F-005 / INV-001 (supporting) — identity substrate for `submitted_by`,
-  `changed_by`, and every other `User`-attributed write this spec requires
-- **Description:** `[assumption]` — resolves a caller's `User.auth_identifier` to a session,
-  creating the `User` row on first contact (upsert) since no separate registration flow is
-  specified in the seed. This is the account-level identity layer; it is distinct from the
-  per-listing Facebook-profile anchor that INV-001 actually gates (see Authentication &
-  authorization note above) — this endpoint exists only because API-003/004/005/006 need a
-  resolved `User.id` to attribute writes to, per `data-model.md`'s foreign keys.
-- **Request schema:** `{ auth_identifier: text }` — exact identifier scheme (phone/email/OAuth
-  token) unresolved; see Open questions.
+### API-007 — POST /auth/facebook — Sign up / log in with Facebook
+- **Serves:** UJ-005, account identity substrate (`ADR-0001`) for `submitted_by`, `changed_by`, and
+  every other `User`-attributed write this spec requires
+- **Description:** Verifies a Facebook access token the client obtained via the on-device Facebook
+  Login SDK, upserts the `User` row by `fb_user_id` (creating it on first contact), and issues a
+  Whiskr bearer session token. This is the only sign-up/login path — there is no separate
+  registration flow and no password. This is the account-level identity layer; it is distinct from
+  the per-listing Facebook-profile anchor that INV-001 actually gates (see Authentication &
+  authorization note above) — a logged-in caller still must supply a Facebook profile link per
+  listing (or per batch, F-006/BR-009).
+- **Verification detail:** the backend calls Facebook's Graph API (`GET /me?access_token=<token>
+  &fields=id,name`) to resolve `fb_user_id`/`name` and confirm the token is valid. **[assumption]**
+  — whether to also call the `debug_token` endpoint to confirm the token's `app_id` matches
+  Whiskr's own Facebook App ID (mitigates a stolen-token-from-another-app replay,
+  `security-compliance.md` T-010) is not specified in the seed but is strongly recommended; flagged
+  in Open questions, not silently skipped.
+- **Request schema:** `{ fb_access_token: text }` — the client-obtained Facebook access token.
 - **Response schema:** `200 OK` (existing user) or `201 Created` (new user) — `{ access_token: text,
   user: { id, display_name, is_admin, location_opt_in } }`.
 - **Auth:** none (this endpoint issues auth).
-- **Errors:** `400` malformed identifier; `401` `[assumption]` if the scheme adds a verification
-  step (e.g., OTP) not modeled here.
+- **Errors:** `400` missing `fb_access_token`; `401` token invalid, expired, or (if `debug_token`
+  verification is implemented) issued for a different Facebook App ID.
 
 ### API-008 — GET /users/me — Current user profile
 - **Serves:** F-005 / INV-001 (supporting), F-003 (client needs `is_admin` to render/enable
-  status-change controls per BR-004)
+  status-change controls per BR-004), UJ-006
 - **Description:** Lets the mobile client read back the caller's own `User` row (display name,
   admin flag, location opt-in state) to drive UI without re-deriving it from the login response
   on every screen.
 - **Request schema:** none (identity from bearer token).
-- **Response schema:** `200 OK` — `{ id, display_name, auth_identifier, location_opt_in, is_admin,
-  created_at }`. `[assumption]` — whether `auth_identifier` should be echoed back to the client at
-  all is an open question given it may be PII (`data-model.md` retention classification); flagged
-  below.
+- **Response schema:** `200 OK` — `{ id, display_name, location_opt_in, is_admin, created_at }`.
+  `fb_user_id` is never echoed back to the client (resolved — see Open questions history; was an
+  open question for the prior `auth_identifier` field, now settled as "never returned").
 - **Auth:** Bearer required.
 - **Errors:** `401`.
+
+### API-009 — PATCH /users/me — Edit profile
+- **Serves:** UJ-006, BR-010
+- **Description:** Lets the signed-in user edit their own editable profile fields. Only
+  `display_name` is user-editable; `is_admin` and any Facebook-identity field are never accepted
+  here (BR-010, `security-compliance.md` T-008).
+- **Request schema:** `{ display_name: text }` — required, non-empty.
+- **Response schema:** `200 OK` — the updated user, same shape as API-008's response.
+- **Auth:** Bearer required.
+- **Errors:** `400` empty/missing `display_name`; `401`.
+
+### API-010 — POST /listings/batch — Multi-cat batch report
+- **Serves:** F-006, F-002 (reuses the same per-cat field rules), F-005 / INV-001, BR-009
+- **Description:** Reports 2 or more cats found/lost together in a single request. Each cat becomes
+  its own independently status-tracked `Listing` (same rules as API-003), all sharing one
+  `fb_profile_url` (validated once, per BR-009) and one `ReportBatch.id`. All-or-nothing: if any cat
+  entry fails validation, no listing in the batch is created (`frd.md` FRD-F006-01).
+- **Request schema:**
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `fb_profile_url` | text | yes | Validated once per BR-009; shared across every cat in the batch |
+  | `cats` | array, min length 2 | yes | Each entry has the same shape as API-003's `kind`/`description`/`photo_url`/`location_lat`/`location_lng`/`location_label` fields (BR-001, per cat) |
+- **Response schema:** `201 Created` — `{ batch_id: uuid, listings: Listing[] }` — each `Listing` in
+  the same shape as API-002/API-003's response, all carrying their own `facebook_anchor` (same
+  `fb_profile_url`) and the shared `batch_id`.
+- **Auth:** Bearer required; resolved caller becomes `submitted_by` on every `Listing` in the batch.
+- **Errors:** `400` fewer than 2 entries in `cats`, or any entry missing a BR-001 required field;
+  `422` `fb_profile_url` unresolvable (BR-002/BR-008/INV-001 — checked once for the whole batch);
+  `401`.
 
 ## Error codes
 
@@ -210,19 +245,21 @@ operational capacity. Deprecation policy: none defined yet — MVP has no prior 
 
 ## Open questions
 
-- **Auth scheme:** which identifier (phone OTP, email/password, Facebook OAuth) backs
-  `User.auth_identifier` / API-007 — unresolved in the seed. Given F-005's Facebook-anchor
-  requirement, Facebook OAuth would be a natural fit but is nowhere asserted as the login
-  mechanism — do not assume it without product-owner confirmation.
+- **~~Auth scheme~~ RESOLVED 2026-09-18:** Facebook OAuth is the sole login/signup mechanism
+  (`ADR-0001`); see Authentication & authorization above. Kept here, struck through, as a record
+  rather than deleted — `decision-ledger.md` §3 is the canonical account of why.
+- **Facebook token app-id verification:** whether API-007 also calls Facebook's `debug_token`
+  endpoint to confirm a presented token's `app_id` matches Whiskr's own (mitigating the
+  stolen-token-from-another-app replay named in `security-compliance.md` T-010) is not yet
+  confirmed as implemented — flagged, not silently assumed done.
 - **Status transition table:** is every `Listing.status` enum value reachable from every other
   (API-004), or are some transitions (e.g., `adopted` → `available`) disallowed? No rule is stated.
 - **Pagination/search strategy:** cursor shape and `q` match semantics on API-001 are
   `[assumption]`; no NFR or UX spec constrains them.
-- **Rate limiting:** no policy exists; see Rate limits above.
-- **Object/photo upload path:** `photo_url` on API-003 assumes the client already has a URL from an
-  out-of-band upload step; no upload endpoint or object-store contract is specified in
+- **Rate limiting:** no policy exists; see Rate limits above — now also relevant to API-010, which
+  writes N listings per call (`security-compliance.md` T-011).
+- **Object/photo upload path:** `photo_url` on API-003/API-010 assumes the client already has a URL
+  from an out-of-band upload step; no upload endpoint or object-store contract is specified in
   `data-model.md`/`system-design.md` to model here.
-- **PII exposure on API-008:** whether `auth_identifier` should be returned to the client at all,
-  given its PII classification in `data-model.md`.
 - **Machine-readable spec:** this Markdown contract has no OpenAPI/GraphQL/protobuf equivalent yet;
   flagged per the template's stated purpose.

@@ -11,19 +11,19 @@
 > REJECTs. Filled in once, by the lead, never by the planner or keeper: the Vault does not advance
 > from docs to code on its own (`adr/ADR-0010`).
 
-**Plan steward:** planner (Sonnet 5, this Vault run) — no named human lead exists yet for Whiskr
-(`team_size: 1`, solo); a human product owner still must record Build approval below before any
-task may leave `blocked`/`cut`.
+**Plan steward:** planner (Sonnet 5, this Vault run)
 **Status writer:** keeper *(the only role that edits Status cells and phase rows)*
-**Build approval:** <blank — the lead fills this in; see Purpose above>
-**Last checkpoint:** 2026-09-18 · plan authored; no build checkpoint exists yet (no task has been
-claimed — Build approval is still pending).
+**Build approval:** Jimuelle07 · Solo Developer · 2026-09-18
+**Last checkpoint:** 2026-09-18 · Build approval recorded; PRD/FRD/system-design/data-model/api-spec/
+security-compliance/qa-test-plan reconciled the same day for two pivots (`decision-ledger.md`):
+Facebook-OAuth-only auth (`ADR-0001`) and new MVP feature F-006 (multi-cat batch reporting). No task
+has been claimed yet — `TASK-001`..`TASK-004` are the first wave now eligible for `ready`.
 **Deadline / demo cutoff:** [assumption] — no hard submission/demo deadline is stated anywhere in
 the seed or delivery facts. `context.md`'s `time_budget: 2w` is an order-of-magnitude budget, not a
 confirmed cutoff; treat ~2 weeks from Build approval as a soft target only, to confirm with the
 product owner.
-**Honest stopping point:** none passed yet — no phase has opened or closed; this plan has not been
-built against (Build approval pending).
+**Honest stopping point:** none passed yet — no phase has opened or closed; Build approval is
+recorded but no task has been claimed/built against yet.
 
 ## 1. Planning inputs (delivery facts, asked once at phase-5.0)
 
@@ -49,10 +49,11 @@ built against (Build approval pending).
   This is also the sole A-001-testing flow (`prd.md`, `idea.md` §9).
 - **Highest implementation risks:** (1) Facebook ToS/scraping exposure — a named kill criterion
   (`idea.md` §9, `security-compliance.md`'s dedicated subsection) that F-001's ingestion pipeline
-  depends on entirely; (2) the undecided auth mechanism (`api-spec.md`/`security-compliance.md`
-  both flag this as `[assumption]`, unresolved) that every authenticated endpoint sits on top of;
-  (3) admin-role provisioning for BR-004/INV-002 has no model in the seed; (4) the push-provider
-  vendor (APNs/FCM) is unconfirmed, gating F-004 delivery.
+  depends on entirely; (2) ~~the undecided auth mechanism~~ **RESOLVED 2026-09-18** — Facebook OAuth
+  only, no app-side password (`ADR-0001`); the remaining risk is narrower: confirming the Graph API
+  token-verification approach (`debug_token` app-id check, `security-compliance.md` T-010) at
+  scaffold, not the mechanism choice itself; (3) admin-role provisioning for BR-004/INV-002 has no
+  model in the seed; (4) the push-provider vendor (APNs/FCM) is unconfirmed, gating F-004 delivery.
 - **Fast gate:** `npm --prefix backend test -- --silent` (unit suite only) — **[assumption]** per
   `qa-test-plan.md`; **does not exist yet** — no such npm script/project exists until `TASK-001`
   lands.
@@ -83,17 +84,20 @@ re-read returned PASS (`process/build-loop.md`).
 | PH-02 | A listing's lifecycle closes correctly: the submitter/admin can mark it resolved and it never again displays as available/missing (F-003, INV-002, UJ-004), and stale listings drop out of the default feed without a status mutation. | `npm --prefix backend test && npm --prefix mobile test && npm --prefix mobile run e2e:core` | pending |
 | PH-03 | The feed aggregates real scraped listings, not only manual ones: cross-page/group dedup collapses re-posts to one listing (F-001) and the original poster's attribution link survives ingestion and dedup merge (INV-003). | `npm --prefix backend test && npm --prefix mobile test && npm --prefix mobile run e2e:core` | pending |
 | PH-04 | A `missing` report fans out a real location-based push alert to nearby opted-in users with a delivery audit trail, and the mobile client can register for and receive one (F-004, UJ-003). | `npm --prefix backend test && npm --prefix mobile test && npm --prefix mobile run e2e:core` | pending |
+| PH-05 | A finder can report multiple cats found/lost together in a single batch submission (F-006), each cat becoming its own independently status-tracked listing sharing a batch reference. Added 2026-09-18 per `decision-ledger.md` (new MVP feature, product-owner request). | `npm --prefix backend test && npm --prefix mobile test && npm --prefix mobile run e2e:core` | pending |
 
 ### Cut line
 
 PH-01 is the line that must pass for any demo to be honest — it alone proves F-002, F-005,
 INV-001, and the core A-001-testing journey UJ-001. If PH-02 also lands, INV-002 (the hard "never
-show resolved as available" rule) and UJ-004 are covered. PH-03 (scraper aggregation, F-001) and
-PH-04 (alerts, F-004) are both MVP-priority features per the PRD, but if time is the binding
-constraint, cut in this order first: `TASK-014` (mobile push tap-through UI) → `TASK-009` (mobile
-mark-resolved UI, keeping the backend enforcement live via API only) → all of PH-04 → all of PH-03.
-Never cut anything inside PH-01 or the INV-002 enforcement task (`TASK-007`) — those are the
-invariant floor. (Same line is derived from the checker's output in §5.)
+show resolved as available" rule) and UJ-004 are covered. PH-03 (scraper aggregation, F-001),
+PH-04 (alerts, F-004), and PH-05 (multi-cat batch reporting, F-006) are all MVP-priority features
+per the PRD, but if time is the binding constraint, cut in this order first: `PH-05` (batch
+reporting — newest addition, not part of the original core demo journey) → `TASK-014` (mobile push
+tap-through UI) → `TASK-009` (mobile mark-resolved UI, keeping the backend enforcement live via API
+only) → all of PH-04 → all of PH-03. Never cut anything inside PH-01 or the INV-002 enforcement task
+(`TASK-007`) — those are the invariant floor. (Same line is derived from the checker's output in
+§5.)
 
 ## 3. Task ledger
 
@@ -112,16 +116,16 @@ Allowed status: `ready | in_progress | blocked | done | cut`. Rules the checker 
   landed: <sha>`, or `waived: <reason>` on a lead decision.
 - One table, ordered by ID; rows never move; a second status list is never kept.
 
-**Every task below is `blocked`, never `ready`/`in_progress`/`done`** — Build approval is not yet
-recorded (§ header), and the checker rejects any gated status without it. `TASK-001`..`TASK-004`
-have no unmet dependency and would be the first wave marked `ready` the moment a human lead
-records Build approval and the keeper claims them.
+**Build approval is now recorded (§ header).** `TASK-001`..`TASK-004` have no unmet dependency and
+are the first wave eligible for `ready` the moment the keeper claims them; every other task remains
+`blocked` on its dependency chain until then. Status transitions are still keeper-only (R5) — this
+plan edit records eligibility, not a status change.
 
 | ID | Phase | Outcome / trace | Depends on | Owner | Write scope | Verify | Tests | Work ref | Status | Gate / evidence |
 |---|---|---|---|---|---|---|---|---|---|---|
 | TASK-001 | PH-01 | backend workspace scaffold + Jest test runner; infra | — | executor | `package.json, tsconfig.json, backend/` | `npm --prefix backend test -- --silent` | — | — | blocked | `npm --prefix backend test -- --silent` |
 | TASK-002 | PH-01 | mobile (React Native) workspace scaffold + Detox e2e runner; infra | TASK-001 | executor | `mobile/` | `npm --prefix mobile test -- --silent` | — | — | blocked | `npm --prefix mobile test -- --silent` |
-| TASK-003 | PH-01 | bearer-token auth substrate (API-007 `/auth/sessions`, API-008 `/users/me`); infra — identifier scheme itself stays `[assumption]`, endpoint shape only | TASK-001 | executor | `backend/src/auth` | `npm --prefix backend test -- auth/session` | — | — | blocked | `npm --prefix backend test -- auth/session` |
+| TASK-003 | PH-01 | Facebook OAuth auth substrate (API-007 `POST /auth/facebook`, API-008 `GET /users/me`, API-009 `PATCH /users/me` profile edit); F-005/INV-001 supporting substrate, BR-010, `ADR-0001` | TASK-001 | executor | `backend/src/auth` | `npm --prefix backend test -- auth` | TC-007 pending | — | blocked | `npm --prefix backend test -- auth` |
 | TASK-004 | PH-01 | FB-profile identity-anchor validation gate; F-005, INV-001 | TASK-001 | executor | `backend/src/listings` | `npm --prefix backend test -- listings/identity-anchor` | TC-005 pending | — | blocked | `npm --prefix backend test -- listings/identity-anchor` |
 | TASK-005 | PH-01 | manual submission endpoint + minimal feed read (API-001/API-003), same-session visibility; F-002, F-001 | TASK-003, TASK-004 | executor | `backend/src/submissions, backend/src/listings` | `npm --prefix backend test -- submissions/submit.integration` | TC-002 pending | — | blocked | `npm --prefix backend test -- submissions/submit.integration` |
 | TASK-006 | PH-01 | mobile Report-a-cat screen + confirmation screen; the UJ-001 core smoke walk; F-002, F-005 | TASK-002, TASK-005 | executor | `mobile/src/screens/ReportACat, mobile/e2e` | `npm --prefix mobile run e2e -- report-a-cat` | TC-002 pending | — | blocked | `npm --prefix mobile run e2e -- report-a-cat` |
@@ -133,6 +137,7 @@ records Build approval and the keeper claims them.
 | TASK-012 | PH-04 | location opt-in + push-token registration endpoints (API-005/API-006); F-004 | TASK-003 | executor | `backend/src/users` | `npm --prefix backend test -- users/location` | TC-004 pending | — | blocked | `npm --prefix backend test -- users/location` |
 | TASK-013 | PH-04 | location-based alert fanout worker + delivery audit trail; F-004 | TASK-007, TASK-012 | executor | `backend/src/alerts` | `npm --prefix backend test -- alerts/geofence.integration` | TC-004 pending | — | blocked | `npm --prefix backend test -- alerts/geofence.integration` |
 | TASK-014 | PH-04 | mobile push-token registration + notification tap-through to listing detail; F-004, UJ-003 | TASK-013, TASK-006 | executor | `mobile/src/notifications` | `npm --prefix mobile test -- pushNotificationHandler` | TC-004 pending | — | blocked | `npm --prefix mobile test -- pushNotificationHandler` |
+| TASK-015 | PH-05 | multi-cat batch report endpoint (API-010 `POST /listings/batch`); F-006, BR-009 | TASK-004, TASK-005 | executor | `backend/src/reports` | `npm --prefix backend test -- reports/batch.integration` | TC-006 pending | — | blocked | `npm --prefix backend test -- reports/batch.integration` |
 
 ### Known gaps in the Tests column (named, not silently forced green)
 
@@ -175,7 +180,7 @@ says otherwise; flagged as open, not decided here.
 ## 5. Execution view (derived — paste the checker's output, do not hand-maintain)
 
 ```
-APPROVE: docs/implementation-plan.md — 4 phase(s), 14 task(s); phase sequence, DAG, gating, and Build-First verify evidence are coherent (tests=deferred)
+APPROVE: docs/implementation-plan.md — 5 phase(s), 15 task(s); phase sequence, DAG, gating, and Build-First verify evidence are coherent (tests=deferred)
 Honest stopping point: none passed yet · open: PH-01
 PH-01 [open] — 6 task(s)
   wave 0: TASK-001(blocked)
@@ -192,15 +197,23 @@ PH-04 [pending] — 3 task(s)
   wave 2: TASK-012(blocked)
   wave 4: TASK-013(blocked)
   wave 5: TASK-014(blocked)
+PH-05 [pending] — 1 task(s)
+  wave 3: TASK-015(blocked)
 Ready now: none
 Parallel-safety: no same-phase same-wave write-scope overlaps
 ```
 
-Ready now: none (Build approval not yet recorded; every task is `blocked`) · Blocked on: a named
-human lead recording `**Build approval:** <name/role> · <ISO-8601>` in the header above · **Parallel-safe this wave:** once approved, `TASK-002`, `TASK-003`, `TASK-004` (PH-01 wave 1) are disjoint-scope and safe to run in parallel · **Cut line if time ends:** PH-01 (non-negotiable) → PH-02 → cut `TASK-014` then `TASK-009` then all of PH-04 then all of PH-03 if time is the binding constraint (see §2).
+Ready now: none in the Status column yet (status transitions are keeper-only, R5) · Build approval
+**is** recorded (§ header) — `TASK-001` (wave 0), then `TASK-002`/`TASK-003`/`TASK-004` (wave 1) are
+the first tasks the keeper may claim into `ready` · **Parallel-safe this wave:** `TASK-002`,
+`TASK-003`, `TASK-004` (PH-01 wave 1) are disjoint-scope and safe to run in parallel once `TASK-001`
+is `done` · **Cut line if time ends:** PH-01 (non-negotiable) → PH-02 → cut `PH-05` (batch reporting)
+then `TASK-014` then `TASK-009` then all of PH-04 then all of PH-03 if time is the binding
+constraint (see §2).
 
 ## 6. Plan change log
 
 | Timestamp / event | Phases / tasks changed | Why / evidence | Canonical docs reconciled |
 |---|---|---|---|
+| 2026-09-18 · Build approval + reconcile | Build approval recorded (header); TASK-003 outcome/verify updated (Facebook OAuth + profile edit); PH-05 + TASK-015 added | Product owner recorded Build approval and resolved two open decisions: auth mechanism → Facebook OAuth only, no forgot-password (`ADR-0001`); new MVP feature F-006 multi-cat batch reporting (`decision-ledger.md` §3) | `docs/prd.md`, `docs/frd.md`, `docs/system-design.md`, `docs/data-model.md`, `docs/api-spec.md`, `docs/security-compliance.md`, `docs/qa-test-plan.md`, `docs/seed/idea.md`, `docs/decision-ledger.md`, `docs/adr/ADR-0001` |
 | 2026-09-18 · kickoff | PH-01..PH-04; TASK-001..TASK-014 | initial phase/task cut from PRD + system design + QA plan + delivery facts; PH-01 is the thinnest walkable UJ-001 slice per planner rules; PH-02 isolates the INV-002 hard invariant; PH-03/PH-04 split the two remaining MVP features (F-001 scraper aggregation, F-004 alerting) by risk/demoability | `docs/prd.md`, `docs/system-design.md`, `docs/qa-test-plan.md`, `docs/data-model.md`, `docs/api-spec.md`, `docs/frd.md`, `docs/technical-design.md`, `docs/security-compliance.md` |

@@ -37,6 +37,11 @@ _(From `idea.md` §2; single target segment, two situational modes.)_
   alert when a Lost/Found report is posted within their radius (F-004), and taps into the listing.
 - **UJ-004** — Resolve a listing: the original submitter or an admin marks a listing resolved
   (adopted/found), after which it must never again display as available/missing (F-003, INV-002).
+- **UJ-005** — Sign up / log in: a new or returning user taps **Continue with Facebook**, authorizes
+  via Facebook OAuth, and lands on Home/Feed with an account (display name sourced from Facebook, no
+  password to set or remember — `ADR-0001`).
+- **UJ-006** — View/edit profile: a signed-in user opens their profile, sees display name, admin
+  status, and location-alert opt-in state, and can edit their display name (BR-010).
 
 ## Feature list (with priorities)
 <!-- Reuse F-### from idea.md §7 exactly. Do NOT invent feature IDs here. Every row gets a TC. -->
@@ -48,6 +53,7 @@ _(From `idea.md` §2; single target segment, two situational modes.)_
 | F-003 | Status tagging (available / on hold / adopted / found) + stale-listing suppression | MVP | §1 | UJ-002, UJ-004 | Two mechanisms: explicit resolution (INV-002) vs. time-based feed suppression |
 | F-004 | Location-based missing-cat alert pinned to an area, pushed to nearby users | MVP | §1 | UJ-003 | Default radius 5 km per `usability.md` §1 confirmation copy |
 | F-005 | Every post requires a linked, visible Facebook profile as an identity anchor | MVP | §7 (trust/scam risk) | UJ-001 | Enforces INV-001; blocks Submit until attached per `usability.md` §1 |
+| F-006 | Multi-cat batch report: a single submission reports 2+ cats found/lost together, each becoming its own independently status-tracked listing | MVP | §7 (added 2026-09-18) | UJ-001 (extended) | Additive to F-002; grouped by a shared `ReportBatch` reference, not a new entity type (`decision-ledger.md`) |
 | F-101 | Photo-based matching suggestions between lost/found reports | Final | §7 | — | Post-MVP; parked per `idea.md` §10 |
 | F-102 | Verified rescuer/page badge program (manual vetting) | Final | §7 | — | Post-MVP |
 | F-103 | In-app messaging between finder/adopter and poster | Final | §7 | — | Post-MVP; parked per `idea.md` §10 |
@@ -76,6 +82,13 @@ _(From `idea.md` §2; single target segment, two situational modes.)_
 - **BR-008** — A scraped post that cannot be resolved to a visible, working Facebook profile/page
   link SHALL NOT be published into the feed (enforces INV-001 for the scraper path, mirroring F-005
   for manual submissions).
+- **BR-009** — A batch report (F-006) SHALL require at least 2 cats; each cat entry SHALL
+  independently satisfy BR-001 (status, photo, location, description); the batch SHALL share exactly
+  one `fb_profile_url` across all cats in the batch (BR-002/BR-008 validated once per batch, not per
+  cat).
+- **BR-010** — A user MAY edit their own `display_name` via profile (UJ-006); `is_admin` and any
+  Facebook-identity field SHALL NEVER be user-editable through any client-facing endpoint (reinforces
+  the `is_admin` gate named in `security-compliance.md` T-008).
 
 ## Hard rules / must-never (invariants — `INV-###`)
 - **INV-001** — the system SHALL NEVER publish a post (scraped or manual) that does not carry a
@@ -120,6 +133,9 @@ _(Grounded in `usability.md` §1, USABILITY CLEARED, approved as-is; not redesig
   and SHALL record that the alert was sent.
 - **F-005:** IF a submission (scraped or manual) has no resolvable, visible Facebook profile/page
   link, THEN the system SHALL refuse to publish it to the feed (ties to INV-001/TC-N01).
+- **F-006:** WHEN a user submits a batch report with 2 or more cats, each satisfying BR-001, and one
+  shared attached Facebook profile, the system SHALL create one independently status-tracked listing
+  per cat, all linked to a single batch reference, visible in the feed within the same session.
 
 ## Non-goals
 _(Mirrors `idea.md` §10.)_
@@ -129,6 +145,8 @@ _(Mirrors `idea.md` §10.)_
 - Photo-based automatic lost/found matching (parked as F-101).
 - Verified-partner API integrations with rescue pages (parked as F-104).
 - In-app messaging (parked as F-103).
+- Password-based login or a "forgot password" flow — no app-side password exists; Facebook OAuth is
+  the sole account mechanism (`ADR-0001`), so this is an intentional consequence, not a gap.
 
 ## Dependencies
 - Public Facebook page/group content reachable for scraping (F-001) — availability and terms are an
@@ -138,7 +156,10 @@ _(Mirrors `idea.md` §10.)_
   named in the seed; to confirm at scaffold (system-design).
 - Device location services (F-004, UJ-002/UJ-003) — user-granted permission; no location, no alert.
 - A Facebook profile/page a user can link to (F-005, INV-001) — the product has no fallback identity
-  anchor if a user has no Facebook presence; this is an explicit product constraint, not a gap.
+  anchor if a user has no Facebook presence; this is an explicit product constraint, not a gap. This
+  same Facebook identity is now also the sole account login/signup mechanism (`ADR-0001`, resolved
+  2026-09-18) — a user with no Facebook account cannot create a Whiskr account at all, a stronger
+  version of the same constraint.
 
 ## Open questions
 - Staleness window value (BR-005) — **[assumption]** 30 days; not specified in the seed.

@@ -57,6 +57,46 @@ to UNVALIDATED) · superseding ADR (if any). Pivot types (from the design of rec
 Several entries below are foundational Key-phase decisions rather than pivots from a prior state —
 where none of the enumerated types fit, the entry says so plainly rather than forcing a mismatch.
 
+### 2026-09-18 — Auth mechanism resolved: Facebook OAuth only, no app-side password
+- **Type:** decision (auth-mechanism selection — no enumerated pivot type fits cleanly)
+- **Change:** `User.auth_identifier` `[assumption]` (phone/email/OAuth, unresolved) → Facebook OAuth
+  is the sole account login/signup mechanism; no app-side password exists, so no forgot-password
+  flow is built.
+- **Why:** direct product-owner decision (this session, asked because "forgot password" was
+  requested alongside login/signup). Reuses the same Facebook identity every user already needs for
+  F-005's per-listing anchor, avoiding a second identity system and its own password-reset
+  infrastructure.
+- **Alternatives rejected:** email + password (would require building/securing its own reset-flow
+  infrastructure — password hashing, reset-token generation/expiry, reset-email delivery — unjustified
+  duplication for `team_size: 1`); phone OTP (SMS delivery cost/infra with no stated justification in
+  the seed); hybrid Facebook-OAuth-plus-optional-password (rejected as unnecessary doubled auth
+  surface).
+- **Invalidated:** the `[assumption]` auth-mechanism rows in `api-spec.md` (Authentication &
+  authorization), `data-model.md` (`User.auth_identifier`), and `security-compliance.md` (Authn/authz
+  model) — no longer UNVALIDATED, resolved by this decision. A "forgot password" feature is
+  explicitly out of scope as a direct, intentional consequence, not an oversight.
+- **Recorded as:** `docs/adr/ADR-0001` — meets the triple gate (hard to reverse once accounts exist
+  under Facebook identity; surprising without context; a real trade-off — no forgot-password path,
+  account recovery entirely dependent on the user's own Facebook account access).
+
+### 2026-09-18 — New MVP feature: multi-cat batch reporting (F-006)
+- **Type:** `need` (a real-world reporting case the original single-cat-per-submission model did not
+  account for)
+- **Change:** (F-002 assumed exactly one cat per manual submission) → a submitter may report 2 or
+  more cats found/lost together in one batch request; each cat still becomes its own independently
+  status-tracked `Listing`, grouped by a shared `ReportBatch` reference.
+- **Why:** product-owner request (this session) — litters and multi-cat finds/losses are a common
+  real-world case F-002's one-cat-per-form model did not cover.
+- **Alternatives rejected:** modeling a batch as a single `Listing` with a cat-count field (rejected —
+  breaks F-003's per-cat status lifecycle; a litter is rarely adopted/found all at once, and INV-002
+  must hold per cat, not per batch); a fully separate `Report` entity distinct from `Listing`
+  (rejected — would duplicate every F-003/INV-002 status rule for a second entity type; `ReportBatch`
+  is a thin, additive grouping reference instead).
+- **Invalidated:** none — additive to F-002/F-005; every cat in a batch still gets its own
+  `FacebookAnchor` row and independently satisfies INV-001, unchanged.
+- **Recorded as:** none — additive feature, not a hard-to-reverse architectural choice; does not meet
+  the ADR triple gate.
+
 ### 2026-09-18 — Native mobile app chosen as form factor
 - **Type:** `platform`
 - **Change:** (no prior form factor) → native mobile app
@@ -156,6 +196,7 @@ gets breached by accident under pressure.
 | Date | INV-### | Change that touched it | Audit verdict |
 |------|---------|------------------------|---------------|
 | 2026-09-18 | INV-001 | Established during the Key phase: every post must carry a visible, linked Facebook profile (F-005) — decided as the MVP trust/verification mechanism (see §3) | kept — upheld as a hard invariant rather than softened; the heavier "verified badge" alternative was deferred to final scope (F-102) instead of weakening the MVP requirement |
+| 2026-09-18 | INV-001 | F-006 (multi-cat batch reporting) extends F-002's submission path to N cats per request | kept — each cat in a batch still gets its own `FacebookAnchor` row committed in the same all-or-nothing transaction; INV-001 is enforced per-listing, unchanged by batching |
 
 ## 6. Open items / risks (do not lose these)
 

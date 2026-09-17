@@ -3,7 +3,7 @@
 > **Purpose:** behavior detail. Exactly how the system must behave per feature, one level more
 > precise than the PRD's EARS acceptance criteria — exact field validation, state transitions, edge
 > cases. Grounded in `prd.md`'s `BR-###`/`INV-###` and `system-design.md`'s component boundaries.
-> Traces back to: `prd.md` feature list (F-001..F-005, MVP only). Traces forward to: QA test cases.
+> Traces back to: `prd.md` feature list (F-001..F-006, MVP only). Traces forward to: QA test cases.
 > No new `F-###`/`BR-###` numbering — IDs below are reused verbatim from `prd.md`. Where this doc
 > adds a rule not already an `BR-###` in the PRD, it is labeled `FRD-F0##-0#` (doc-local, not a PRD
 > business rule) so it is never confused with a PRD-sourced ID.
@@ -328,10 +328,70 @@ Delegates to F-002's error handling (manual path: unresolvable-link submit block
 handling (scraped path: BR-008 publish-time rejection) — not duplicated here to avoid two sources of
 truth for the same failure message.
 
+### F-006 — Multi-cat batch report (2+ cats found/lost together)
+
+**Description**
+An additive variant of F-002's manual-submission path: the same Backend API validation logic runs
+once per cat entry in the batch, plus one shared Facebook-anchor check (BR-009), all inside a single
+all-or-nothing transaction. Each cat becomes its own `Listing` row with its own independent
+`status`/`StatusHistory` lifecycle (F-003 applies per cat, unchanged); the only new concept is
+`ReportBatch`, a thin grouping reference with no lifecycle of its own.
+
+**Inputs**
+| Name | Type | Source | Validation |
+|---|---|---|---|
+| Facebook profile | URL / attach-flow result | `[Attach Facebook profile]` action, once per batch | Same resolvability check as F-005/FRD-F005-01; validated once, reused for every cat in the batch |
+| `cats[]` | array (min length 2) | Report-a-batch form | Each entry independently satisfies BR-001 (status, photo, location, description) exactly as F-002's single-cat form does; fewer than 2 entries is rejected as a plain single-cat submission belongs on F-002/API-003 instead |
+
+**Outputs**
+| Name | Type | Destination | Format |
+|---|---|---|---|
+| `ReportBatch` record | `id`, `submitted_by`, `created_at` | Data store | One row per batch submission |
+| `Listing` record (× N) | as F-002, plus `batch_id` set to the new `ReportBatch.id` | Data store | One row per cat, each with its own `FacebookAnchor` row carrying the same `fb_profile_url` |
+| Confirmation screen data | N listing cards, one per cat, each with its own status tag and the shared linked FB profile | Mobile Client | Rendered confirmation view (UJ-001 extended) |
+
+**Business rules**
+- **BR-009** — batch requires ≥2 cats; each independently satisfies BR-001; one shared
+  `fb_profile_url` validated once for the whole batch (BR-002/BR-008 semantics, run once).
+- **FRD-F006-01** — the batch write is all-or-nothing: if the shared Facebook-anchor check fails, or
+  any single cat entry fails BR-001, **no** `Listing` in the batch is created — never a partial batch
+  (mirrors F-002's "no partial/half-written listing" rule, extended to N rows in one transaction).
+- **FRD-F006-02** — each cat's `kind` (adoption/lost/found) is independent within the same batch — a
+  batch MAY mix, e.g., two `lost` cats and one `found` cat reported together; there is no rule
+  requiring every cat in a batch to share the same `kind`.
+
+**State transitions**
+Creation only, identical per-cat semantics to F-002 (each `Listing` enters exactly one of
+`{available, missing, found}` per FRD-F002-01's mapping, independently). `ReportBatch` itself has no
+state/lifecycle — it is a grouping reference, never mutated after creation.
+
+**Edge cases**
+- One cat in the batch is `lost` (→ `missing`) → that cat's own F-004 alert fanout fires
+  independently; sibling cats in the same batch with a different `kind` do not trigger an alert.
+- A submitter later resolves one cat in a batch (F-003/UJ-004) → only that cat's `Listing` transitions;
+  sibling listings in the same `ReportBatch` are unaffected (INV-002 is enforced per listing, not per
+  batch).
+- Exactly 1 cat submitted to the batch endpoint → rejected (BR-009's "at least 2" floor); the client
+  should route a single cat through F-002/API-003 instead, not the batch endpoint.
+- Network failure mid-batch-submit → the whole transaction rolls back; zero listings are created (no
+  N-1-of-N partial batch), consistent with FRD-F006-01.
+
+**Error handling**
+| Trigger | System response | User-facing message |
+|---|---|---|
+| Fewer than 2 cats in the batch | 400, no write | "A batch report needs at least 2 cats — use Report a cat for one." |
+| Any cat entry missing a BR-001 field | 400, no write (whole batch rejected) | Field-level hint naming which cat entry failed |
+| Shared FB profile URL unresolvable | 422, no write (whole batch rejected) | "This Facebook profile/page link isn't accessible — attach a working link." |
+
+---
+
 ## Open questions
 _(Surfaced while writing this doc; none are new PRD-level facts — all trace to an existing
 `[assumption]` in `prd.md`/`system-design.md`, or are FRD-local precision gaps this doc had to make
 an explicit call on.)_
+- **F-006** — whether a batch's cats may mix `kind` values (adoption/lost/found) freely is resolved
+  here as "yes, independent per cat" (FRD-F006-02); flagged since the PRD itself does not spell this
+  out explicitly.
 - **F-003** — exact semantic split between `found` and `resolved` for a `missing`-report closure is
   assumed, not sourced; the terminal-state guard's "no override, including for admins" strictness is
   an FRD-level call the PRD's INV-002 wording supports but does not spell out this precisely.

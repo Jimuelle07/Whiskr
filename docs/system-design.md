@@ -45,10 +45,13 @@ external dependency (PRD "Dependencies").
   submission form (F-002), feed browsing/filtering (F-001/F-003), push handling (F-004), status
   actions (mark resolved, F-003/INV-002 trigger). Depends on the Backend API contract only — no
   direct data-store or scraper access.
-- **Backend API** — the single contract boundary (`exposes_api: true`). Owns auth, listing CRUD,
-  submission intake/validation (BR-001, BR-002, BR-008 → INV-001), status transitions (BR-003,
-  BR-004 → INV-002), and read/filter/search endpoints for the feed. Depends on the data store and
-  enqueues work for the ingestion/alerting workers; never talks to Facebook directly.
+- **Backend API** — the single contract boundary (`exposes_api: true`). Owns auth (Facebook OAuth
+  token verification against the Graph API, session issuance — `ADR-0001`), listing CRUD,
+  submission intake/validation (BR-001, BR-002, BR-008, BR-009 → INV-001), status transitions
+  (BR-003, BR-004 → INV-002), and read/filter/search endpoints for the feed. Depends on the data
+  store and enqueues work for the ingestion/alerting workers; talks to Facebook only for (a) the
+  scraper's read-only page/group polling and (b) verifying a client-supplied OAuth token against the
+  Graph API at login — never to post, write, or act on a user's behalf on Facebook itself.
 - **Scraper / Ingestion pipeline (worker)** — polls configured NCR/Greater-Manila-Area Facebook
   pages/groups on a schedule, normalizes posts, computes a dedup fingerprint (BR content match) to
   collapse cross-posts of the same listing (F-001), preserves the original post URL (BR-007 →
@@ -112,12 +115,19 @@ trade-off recorded below.
 | Two convergent write paths (scrape + manual) into one `Listing` entity/API, rather than separate tables/services | Keeps status/staleness/alerting logic single-sourced; avoids two divergent enforcement paths for INV-001/INV-002 | Slightly more validation branching in one endpoint (source-dependent required fields) | Fully separate "ScrapedListing" vs. "ManualListing" services — rejected: would duplicate INV-002/INV-003 enforcement and double the surface for staleness-engine bugs |
 | Relational store with geo-query support (e.g., PostgreSQL + PostGIS) — **[assumption]**, not specified in seed | Needs both relational integrity (status history, FK to users/scrape sources) and radius queries (F-004/BR-006) | Requires a geo-capable extension/index, an added ops dependency | A separate geo-search service (e.g., dedicated spatial DB) alongside a relational store — rejected at MVP scale: two data stores is unjustified operational overhead for `team_size: 1` |
 | Push via native platform providers (APNs/FCM) — **[assumption]**, no vendor named in seed | Standard, lowest-friction path for mobile push at MVP | External dependency outside the product's control (delivery, rate limits) | Building a custom polling-based in-app-only alert — rejected: defeats F-004's "pushed to nearby users" requirement, which implies out-of-app delivery |
+| Facebook OAuth as the sole account login/signup mechanism (`ADR-0001`) | Reuses the same Facebook identity every user already needs for F-005's per-listing anchor; avoids building/securing a second password-based identity system for `team_size: 1` | No forgot-password path; account recovery depends entirely on the user's own Facebook account access; a user with no Facebook account cannot use Whiskr at all | Email + password (rejected: doubles the identity-system surface, needs its own reset-flow infra with no stated justification); phone OTP (rejected: SMS cost/infra, no stated justification) |
 
 ## Integration points
 - **Facebook (public pages/groups)** — read-only scrape target. Failure modes: page/group structure
   changes break the scraper (mitigated by the manual-submission pipeline as the A-001 fallback per
   `idea.md`/`validation.md`); explicit ban/takedown is a named kill criterion, not merely an
   operational risk — flagged, not silently absorbed.
+- **Facebook OAuth / Graph API (token verification)** — a distinct integration surface from the
+  scrape target above, even though both are Facebook: the Backend API verifies a client-supplied
+  access token via a Graph API call at login (`ADR-0001`, API-007). Failure mode: a Graph API outage
+  or rate-limit on the verification call blocks login/signup entirely (not just scraping) — this is
+  a new availability dependency this decision introduces, named here rather than silently folded
+  into the scrape-target row above.
 - **Push provider (APNs/FCM)** — **[assumption]**, vendor unconfirmed. Failure modes: delivery
   failure/rate-limiting must not block listing creation (alerting is fire-and-forget relative to the
   write path; a failed delivery is retried/logged, never blocks F-002's "visible in the feed within
