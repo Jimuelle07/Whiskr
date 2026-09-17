@@ -88,6 +88,8 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
 | TC-006 | integration + Jest + supertest | `backend/src/reports/__tests__/batch.integration.test.ts` | `npm --prefix backend test -- reports/batch.integration` | task | stdout / Jest report |
 | TC-007 | integration + Jest + supertest | `backend/src/auth/__tests__/facebook-login.integration.test.ts` | `npm --prefix backend test -- auth/facebook-login.integration` | task | stdout / Jest report |
 | TC-008 | unit + Jest | `backend/src/auth/__tests__/facebook-token-verify.test.ts` | `npm --prefix backend test -- auth/facebook-token-verify -t "T-010"` | task | stdout / Jest report |
+| TC-009 | integration + Jest + supertest | `backend/src/uploads/__tests__/photo-url.integration.test.ts` | `npm --prefix backend test -- uploads/photo-url.integration` | task | stdout / Jest report |
+| TC-010 | integration + Jest + supertest | `backend/src/auth/__tests__/logout.integration.test.ts` | `npm --prefix backend test -- auth/logout.integration -t "T-012"` | task | stdout / Jest report |
 | TC-101 | e2e (deferred) | `mobile/e2e/photo-match.e2e.ts` (not yet created) | `npm --prefix mobile run e2e -- photo-match` | post-MVP phase | N/A — not scaffolded |
 | TC-102 | integration (deferred) | `backend/src/badges/__tests__/verify.integration.test.ts` (not yet created) | `npm --prefix backend test -- badges/verify.integration` | post-MVP phase | N/A — not scaffolded |
 | TC-103 | e2e (deferred) | `mobile/e2e/messaging.e2e.ts` (not yet created) | `npm --prefix mobile run e2e -- messaging` | post-MVP phase | N/A — not scaffolded |
@@ -211,6 +213,30 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
   reused.
 - **Automation:** `backend/src/auth/__tests__/facebook-token-verify.test.ts` · `npm --prefix backend
   test -- auth/facebook-token-verify -t "T-010"` · red on current codebase.
+
+### TC-009 — requesting a photo upload URL returns a usable presigned target
+- **Covers:** API-011 (F-002/F-006 supporting infra)
+- **Level:** integration
+- **Preconditions / controlled data:** an authenticated test user; `content_type: image/jpeg`.
+- **Steps:** POST to `/uploads/photo-url`; assert the response shape, then (against a stubbed
+  object-store client, not a live vendor) confirm `photo_url` is well-formed and distinct from
+  `upload_url`.
+- **Expected:** `201` with `{ upload_url, photo_url, expires_at }`; `photo_url` is accepted as-is by
+  API-003/API-010's `photo_url` field on a subsequent submission in the same test.
+- **Automation:** `backend/src/uploads/__tests__/photo-url.integration.test.ts` · `npm --prefix
+  backend test -- uploads/photo-url.integration` · red on current codebase (no uploads module exists
+  yet).
+
+### TC-010 — logout revokes the session; the revoked token is rejected on the next call (T-012)
+- **Covers:** API-007/API-012, `security-compliance.md` T-012
+- **Level:** integration
+- **Preconditions / controlled data:** a logged-in test user holding a valid session token.
+- **Steps:** call `DELETE /auth/sessions`; then call any authenticated endpoint (e.g., `GET
+  /users/me`) reusing the same, now-revoked token.
+- **Expected:** the logout call returns `204`; the subsequent call with the revoked token returns
+  `401` — identical to an expired-token response, not a stale-cache `200`.
+- **Automation:** `backend/src/auth/__tests__/logout.integration.test.ts` · `npm --prefix backend
+  test -- auth/logout.integration -t "T-012"` · red on current codebase (no auth module exists yet).
 
 ### TC-101 — photo-based match suggestion (deferred, post-MVP)
 - **Covers:** F-101

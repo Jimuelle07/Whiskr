@@ -41,7 +41,8 @@ _(From `idea.md` §2; single target segment, two situational modes.)_
   via Facebook OAuth, and lands on Home/Feed with an account (display name sourced from Facebook, no
   password to set or remember — `ADR-0001`).
 - **UJ-006** — View/edit profile: a signed-in user opens their profile, sees display name, admin
-  status, and location-alert opt-in state, and can edit their display name (BR-010).
+  status, and location-alert opt-in state, can edit their display name (BR-010), and can log out
+  (BR-011).
 
 ## Feature list (with priorities)
 <!-- Reuse F-### from idea.md §7 exactly. Do NOT invent feature IDs here. Every row gets a TC. -->
@@ -89,6 +90,9 @@ _(From `idea.md` §2; single target segment, two situational modes.)_
 - **BR-010** — A user MAY edit their own `display_name` via profile (UJ-006); `is_admin` and any
   Facebook-identity field SHALL NEVER be user-editable through any client-facing endpoint (reinforces
   the `is_admin` gate named in `security-compliance.md` T-008).
+- **BR-011** — A signed-in user MAY log out (UJ-006), immediately revoking their current session
+  token; a revoked token SHALL be rejected on every subsequent authenticated call, identically to an
+  expired one (`security-compliance.md` T-012).
 
 ## Hard rules / must-never (invariants — `INV-###`)
 - **INV-001** — the system SHALL NEVER publish a post (scraped or manual) that does not carry a

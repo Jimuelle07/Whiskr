@@ -135,3 +135,29 @@ constraint) plus an audited negative test, not merely asserted in prose.
   reason none rises to blocking — the lead may still choose to require any of them fixed before
   build approval, but none is a contradiction this validator found between what is being built and
   what `idea.md` asked for.
+
+## Addendum — 2026-09-18, post-PASS (not a re-validation)
+
+This section is appended, not a rewrite of the verdict above — the original `PASS` stands as a
+record of what was true when this report was written. The same day, the product owner recorded
+Build approval and directly resolved several items §5 above had explicitly left as
+product-owner-only calls, rather than the validator or planner guessing them:
+
+- **Auth mechanism** (named in §5's last bullet as an `[assumption]` "match the product owner's
+  actual intent" item) → resolved to Facebook OAuth only, no app-side password (`ADR-0001`,
+  `decision-ledger.md`).
+- **New MVP feature F-006** (multi-cat batch reporting) — added to `idea.md` §7 and reconciled
+  through `prd.md`/`frd.md`/`data-model.md`/`api-spec.md`/`qa-test-plan.md` the same day
+  (`decision-ledger.md`).
+- **Session mechanism, logout, and photo-upload contract** — three items this report's Inputs did
+  not need to judge (they postdate this validation pass entirely: no auth/session/upload design
+  existed yet at the time of this PASS) — added via `docs/technical-design.md` Algorithms 4–5,
+  `data-model.md`'s new `Session` entity, and `api-spec.md` API-011/API-012.
+
+None of these change §1–§4's findings about the docs that existed at validation time; they are
+additive resolutions of gaps this report already named as open, not contradictions of anything it
+approved. `trace-ids.py` was re-run after each change and stayed `APPROVE` throughout
+(`docs/harness.md` S9). A fresh validator pass over the current doc set has not been run — the lead
+may request one before phase-5.4 execution proceeds, per this report's own §5 caveat that
+product-owner confirmation of `[assumption]` values is "a product-owner call the documents cannot
+make for themselves," which is exactly what happened here.

@@ -9,6 +9,7 @@
  User ──1───1── UserLocation        (opt-in radius subscription, for F-004/UJ-003)
  User ──1───N── PushToken           (a user may have multiple devices)
  User ──1───N── ReportBatch         (submitted_by; F-006 multi-cat batch reports)
+ User ──1───N── Session             (one row per issued bearer token; API-007/API-012)
 
  ReportBatch ──1───N── Listing      (batch_id, nullable; F-006 grouping reference, no lifecycle of its own)
 
@@ -45,6 +46,22 @@ so status/staleness/alerting logic (F-003, F-004, INV-002) is never duplicated a
 client presents at login is verified against the Graph API once and then discarded — Whiskr never
 persists a long-lived Facebook credential, which keeps `PushToken.token`-style secret-handling scope
 from also applying here.
+
+### Session
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| user_id | uuid (FK → User.id) | no | — | Owner of this session |
+| token_hash | text | no | — | SHA-256 hash of the bearer token returned to the client at API-007; the raw token itself is never stored, only its hash — same principle as password hashing, so a data-store leak alone does not yield directly reusable tokens |
+| created_at | timestamp | no | now() | |
+| expires_at | timestamp | no | `created_at + 90 days` | Fixed 90-day expiration — **[assumption]**, no session-lifetime policy exists in the seed; re-login (a fresh Facebook OAuth round trip, not a "refresh") is required after expiry, consistent with there being no forgot-password/refresh-token flow (`ADR-0001`) |
+| revoked_at | timestamp | yes | null | Set by API-012 (logout); a session with `revoked_at` set is treated identically to an expired one on every authenticated call |
+
+`Session` is what resolves `security-compliance.md`'s previously-open "session mechanism"
+question: **opaque, hashed, revocable bearer tokens**, not JWT — chosen specifically because a real
+logout (API-012) needs true revocation, which a stateless JWT cannot provide without a separate
+denylist (an equivalent extra data-store lookup anyway, at more complexity) — see
+`decision-ledger.md`.
 
 ### ReportBatch
 | Field | Type | Null? | Default | Description |
@@ -170,13 +187,16 @@ can fetch "every cat reported together" without inferring it from timestamps.
 - `AlertDelivery(alert_id, user_id)` — unique (no duplicate delivery record per user per alert).
 - `User.fb_user_id` — unique (one Whiskr account per Facebook identity).
 - `Listing(batch_id)` — index for the "fetch every cat in this batch" read (F-006).
+- `Session.token_hash` — unique + indexed (the lookup path for every authenticated request: hash
+  the incoming bearer token, look up the `Session` row, reject if missing/expired/revoked).
+- `Session(user_id)` — index for "revoke all my sessions" and account-deletion cascade reads.
 - Foreign keys: `Listing.submitted_by → User.id`, `Listing.resolved_by → User.id`,
   `Listing.duplicate_of → Listing.id` (self-referential, nullable), `Listing.batch_id →
   ReportBatch.id` (nullable), `FacebookAnchor.listing_id → Listing.id`, `ScrapedPost.listing_id →
   Listing.id`, `ScrapedPost.scrape_source_id → ScrapeSource.id`, `StatusHistory.listing_id →
   Listing.id`, `Alert.listing_id → Listing.id`, `AlertDelivery.alert_id → Alert.id`,
   `AlertDelivery.user_id → User.id`, `UserLocation.user_id → User.id`, `PushToken.user_id →
-  User.id`, `ReportBatch.submitted_by → User.id`.
+  User.id`, `ReportBatch.submitted_by → User.id`, `Session.user_id → User.id`.
 
 ## Retention & privacy classification
 - **User.fb_user_id** — PII. Retention: life of the account; deleted on account-deletion request.
@@ -184,6 +204,12 @@ can fetch "every cat reported together" without inferring it from timestamps.
   `ADR-0001`), reducing the secret-handling surface to zero long-lived Facebook credentials.
   **[assumption]** — no data-retention policy beyond "life of account" is stated in the seed; this
   follows standard practice, to confirm with product owner/legal at scaffold.
+- **Session.token_hash** — secret-adjacent (same class as `PushToken.token`): a hash, not the raw
+  token, but still sensitive — never logged, never returned in any read path (only the raw token is
+  returned once, at creation, in API-007's response body). Retention: until `expires_at` or
+  `revoked_at`, whichever comes first; expired/revoked rows may be garbage-collected on a schedule
+  (**[assumption]**, no retention job is specified — a reasonable operational default, not a
+  product requirement).
 - **Listing.location_lat/lng, location_label** — PII-adjacent (can reveal a submitter's approximate
   home/found location). Classification: internal; visible to app users by product design (the
   location is the point of the listing), but precise-enough-to-dox precision should be reviewed —
@@ -216,3 +242,5 @@ can fetch "every cat reported together" without inferring it from timestamps.
   new nullable FK column on the existing `Listing` table, no breaking change to any existing row or
   query. `User.fb_user_id` replaces the never-implemented `auth_identifier` column outright (no
   greenfield data existed to migrate, per `ADR-0001`).
+- `Session` (added 2026-09-18, resolving the session-mechanism assumption) is a new, independent
+  table — additive, no change to any existing entity.

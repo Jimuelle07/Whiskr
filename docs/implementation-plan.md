@@ -125,7 +125,7 @@ plan edit records eligibility, not a status change.
 |---|---|---|---|---|---|---|---|---|---|---|
 | TASK-001 | PH-01 | backend workspace scaffold + Jest test runner; infra | — | executor | `package.json, tsconfig.json, backend/` | `npm --prefix backend test -- --silent` | — | — | blocked | `npm --prefix backend test -- --silent` |
 | TASK-002 | PH-01 | mobile (React Native) workspace scaffold + Detox e2e runner; infra | TASK-001 | executor | `mobile/` | `npm --prefix mobile test -- --silent` | — | — | blocked | `npm --prefix mobile test -- --silent` |
-| TASK-003 | PH-01 | Facebook OAuth auth substrate (API-007 `POST /auth/facebook`, API-008 `GET /users/me`, API-009 `PATCH /users/me` profile edit); F-005/INV-001 supporting substrate, BR-010, `ADR-0001` | TASK-001 | executor | `backend/src/auth` | `npm --prefix backend test -- auth` | TC-007 pending | — | blocked | `npm --prefix backend test -- auth` |
+| TASK-003 | PH-01 | Facebook OAuth auth substrate (API-007 `POST /auth/facebook`, API-008 `GET /users/me`, API-009 `PATCH /users/me` profile edit, API-012 `DELETE /auth/sessions` logout, `security-compliance.md` TC-010); F-005/INV-001 supporting substrate, BR-010, BR-011, `ADR-0001` | TASK-001 | executor | `backend/src/auth` | `npm --prefix backend test -- auth` | TC-007 pending | — | blocked | `npm --prefix backend test -- auth` |
 | TASK-004 | PH-01 | FB-profile identity-anchor validation gate; F-005, INV-001 | TASK-001 | executor | `backend/src/listings` | `npm --prefix backend test -- listings/identity-anchor` | TC-005 pending | — | blocked | `npm --prefix backend test -- listings/identity-anchor` |
 | TASK-005 | PH-01 | manual submission endpoint + minimal feed read (API-001/API-003), same-session visibility; F-002, F-001 | TASK-003, TASK-004 | executor | `backend/src/submissions, backend/src/listings` | `npm --prefix backend test -- submissions/submit.integration` | TC-002 pending | — | blocked | `npm --prefix backend test -- submissions/submit.integration` |
 | TASK-006 | PH-01 | mobile Report-a-cat screen + confirmation screen; the UJ-001 core smoke walk; F-002, F-005 | TASK-002, TASK-005 | executor | `mobile/src/screens/ReportACat, mobile/e2e` | `npm --prefix mobile run e2e -- report-a-cat` | TC-002 pending | — | blocked | `npm --prefix mobile run e2e -- report-a-cat` |
@@ -138,6 +138,7 @@ plan edit records eligibility, not a status change.
 | TASK-013 | PH-04 | location-based alert fanout worker + delivery audit trail; F-004 | TASK-007, TASK-012 | executor | `backend/src/alerts` | `npm --prefix backend test -- alerts/geofence.integration` | TC-004 pending | — | blocked | `npm --prefix backend test -- alerts/geofence.integration` |
 | TASK-014 | PH-04 | mobile push-token registration + notification tap-through to listing detail; F-004, UJ-003 | TASK-013, TASK-006 | executor | `mobile/src/notifications` | `npm --prefix mobile test -- pushNotificationHandler` | TC-004 pending | — | blocked | `npm --prefix mobile test -- pushNotificationHandler` |
 | TASK-015 | PH-05 | multi-cat batch report endpoint (API-010 `POST /listings/batch`); F-006, BR-009 | TASK-004, TASK-005 | executor | `backend/src/reports` | `npm --prefix backend test -- reports/batch.integration` | TC-006 pending | — | blocked | `npm --prefix backend test -- reports/batch.integration` |
+| TASK-016 | PH-01 | photo upload URL endpoint (API-011 `POST /uploads/photo-url`); F-002/F-006 supporting infra | TASK-001 | executor | `backend/src/uploads` | `npm --prefix backend test -- uploads/photo-url.integration` | TC-009 pending | — | blocked | `npm --prefix backend test -- uploads/photo-url.integration` |
 
 ### Known gaps in the Tests column (named, not silently forced green)
 
@@ -180,11 +181,11 @@ says otherwise; flagged as open, not decided here.
 ## 5. Execution view (derived — paste the checker's output, do not hand-maintain)
 
 ```
-APPROVE: docs/implementation-plan.md — 5 phase(s), 15 task(s); phase sequence, DAG, gating, and Build-First verify evidence are coherent (tests=deferred)
+APPROVE: docs/implementation-plan.md — 5 phase(s), 16 task(s); phase sequence, DAG, gating, and Build-First verify evidence are coherent (tests=deferred)
 Honest stopping point: none passed yet · open: PH-01
-PH-01 [open] — 6 task(s)
+PH-01 [open] — 7 task(s)
   wave 0: TASK-001(blocked)
-  wave 1: TASK-002(blocked), TASK-003(blocked), TASK-004(blocked)
+  wave 1: TASK-002(blocked), TASK-003(blocked), TASK-004(blocked), TASK-016(blocked)
   wave 2: TASK-005(blocked)
   wave 3: TASK-006(blocked)
 PH-02 [pending] — 3 task(s)
@@ -204,16 +205,18 @@ Parallel-safety: no same-phase same-wave write-scope overlaps
 ```
 
 Ready now: none in the Status column yet (status transitions are keeper-only, R5) · Build approval
-**is** recorded (§ header) — `TASK-001` (wave 0), then `TASK-002`/`TASK-003`/`TASK-004` (wave 1) are
-the first tasks the keeper may claim into `ready` · **Parallel-safe this wave:** `TASK-002`,
-`TASK-003`, `TASK-004` (PH-01 wave 1) are disjoint-scope and safe to run in parallel once `TASK-001`
-is `done` · **Cut line if time ends:** PH-01 (non-negotiable) → PH-02 → cut `PH-05` (batch reporting)
-then `TASK-014` then `TASK-009` then all of PH-04 then all of PH-03 if time is the binding
-constraint (see §2).
+**is** recorded (§ header) — `TASK-001` (wave 0), then `TASK-002`/`TASK-003`/`TASK-004`/`TASK-016`
+(wave 1) are the first tasks the keeper may claim into `ready` · **Parallel-safe this wave:**
+`TASK-002`, `TASK-003`, `TASK-004`, `TASK-016` (PH-01 wave 1) are disjoint-scope and safe to run in
+parallel once `TASK-001` is `done` · **Cut line if time ends:** PH-01 (non-negotiable, now including
+`TASK-016` photo upload — required for BR-001's photo field, not separable from the core slice) →
+PH-02 → cut `PH-05` (batch reporting) then `TASK-014` then `TASK-009` then all of PH-04 then all of
+PH-03 if time is the binding constraint (see §2).
 
 ## 6. Plan change log
 
 | Timestamp / event | Phases / tasks changed | Why / evidence | Canonical docs reconciled |
 |---|---|---|---|
+| 2026-09-18 · complete backend logic in docs (2nd pass) | TASK-003 scope extended (logout, API-012); TASK-016 added (photo upload, API-011) | Product owner directed "finish ALL backend logic via docs before any code" — closed the remaining gaps a real backend needs: session mechanism (opaque hashed tokens, `Session` entity), logout/revocation, and a photo-upload URL contract (`data-model.md`'s object-store field previously had no endpoint) | `docs/technical-design.md` (Algorithms 4–5, sequence diagrams), `docs/data-model.md` (`Session` entity), `docs/api-spec.md` (API-011/API-012), `docs/security-compliance.md` (T-012, session-mechanism resolution), `docs/qa-test-plan.md` (TC-009/TC-010), `docs/prd.md` (BR-011), `docs/decision-ledger.md` |
 | 2026-09-18 · Build approval + reconcile | Build approval recorded (header); TASK-003 outcome/verify updated (Facebook OAuth + profile edit); PH-05 + TASK-015 added | Product owner recorded Build approval and resolved two open decisions: auth mechanism → Facebook OAuth only, no forgot-password (`ADR-0001`); new MVP feature F-006 multi-cat batch reporting (`decision-ledger.md` §3) | `docs/prd.md`, `docs/frd.md`, `docs/system-design.md`, `docs/data-model.md`, `docs/api-spec.md`, `docs/security-compliance.md`, `docs/qa-test-plan.md`, `docs/seed/idea.md`, `docs/decision-ledger.md`, `docs/adr/ADR-0001` |
 | 2026-09-18 · kickoff | PH-01..PH-04; TASK-001..TASK-014 | initial phase/task cut from PRD + system design + QA plan + delivery facts; PH-01 is the thinnest walkable UJ-001 slice per planner rules; PH-02 isolates the INV-002 hard invariant; PH-03/PH-04 split the two remaining MVP features (F-001 scraper aggregation, F-004 alerting) by risk/demoability | `docs/prd.md`, `docs/system-design.md`, `docs/qa-test-plan.md`, `docs/data-model.md`, `docs/api-spec.md`, `docs/frd.md`, `docs/technical-design.md`, `docs/security-compliance.md` |

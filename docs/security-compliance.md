@@ -10,6 +10,7 @@
 | Field | Classification | Notes |
 |---|---|---|
 | `User.fb_user_id` | PII | Retention: life of account, deleted on account-deletion request; no Facebook access/refresh token is ever persisted (verify-then-discard at login, `ADR-0001`) |
+| `Session.token_hash` | Secret-adjacent | Hash only, never the raw token; raw token returned once at creation (API-007), never in any subsequent read; retained until `expires_at`/`revoked_at` |
 | `Listing.location_lat/lng`, `location_label` | PII-adjacent | Internal; visible to app users by product design (the location *is* the listing's point) — precision/fuzzing rule is **[assumption]**, not specified in seed |
 | `UserLocation.lat/lng` | PII | Used only for radius matching (F-004); **not shown to other users**; retained until opt-out/account deletion |
 | `PushToken.token` | Secret-adjacent | Device push credential; not human-readable but treated as sensitive; retained until device unregisters/token rotates |
@@ -25,10 +26,14 @@
   verifies it against the Graph API and upserts `User` by `fb_user_id`. No password exists on
   Whiskr's side, so there is no forgot-password flow and no password-reset attack surface
   (credential stuffing, reset-token leakage) to defend.
-- **Session mechanism** — **[assumption]** retained: no token/session scheme (JWT, opaque session
-  token, etc.) for Whiskr's own bearer token is named in the seed. Whatever is chosen must be
-  validated on every Backend API call per system-design's rule that the Backend API is the sole
-  rule-enforcement point (client version must never matter).
+- **Session mechanism** — RESOLVED 2026-09-18: opaque, hashed, revocable bearer tokens backed by a
+  `Session` row (`data-model.md`) — not JWT, chosen specifically so logout (API-012) can truly
+  revoke a token rather than relying on a denylist. Every authenticated call hashes the incoming
+  bearer token and looks up a non-expired, non-revoked `Session` row; this is validated on every
+  Backend API call per system-design's rule that the Backend API is the sole rule-enforcement point
+  (client version must never matter). Session lifetime is a fixed 90 days — **[assumption]**, no
+  policy is stated in the seed; re-login (a fresh Facebook OAuth round trip) is required after
+  expiry.
 - **Authorization surface**, derived from system-design + data-model without inventing new
   architecture:
   - **Read (feed browse/filter/search, F-001/F-003)** — no auth requirement is stated anywhere in
@@ -69,6 +74,7 @@
 | T-009 | Denial of service / availability | Facebook blocks, rate-limits, or structurally changes pages/groups the scraper polls | Ingestion pipeline (F-001) degrades or stops; feed coverage drops | `ScrapeSource.status` (active/degraded/blocked) is the operational signal; F-002 manual submission is the designed fallback — **this threat is also a named regulatory/kill-criterion risk, treated in its own subsection below, not only here** | Technical kill criterion (`idea.md` §9); see Compliance obligations |
 | T-010 | Spoofing | An attacker replays a Facebook access token obtained for a *different* app (not Whiskr's own Facebook App ID) to log into Whiskr as that Facebook user | Account takeover without the victim ever touching Whiskr | Verify the token's `app_id` via Facebook's `debug_token` endpoint before trusting `fb_user_id` — **[gap]**, not yet confirmed as implemented; flagged in `api-spec.md` API-007 Open questions; guarded by `qa-test-plan.md` TC-008 | `ADR-0001` auth mechanism |
 | T-011 | Denial of service / abuse | A user submits many fake multi-cat batch reports (F-006, API-010) to spam the feed/alert channel, each call producing N listings for the cost of one request | Feed/alert-fanout spam at N-times the cost of a single-cat submission per request | Same per-user write-rate-limit gap already named for API-003/API-004 (Rate limits, `api-spec.md`) now explicitly extends to API-010 at N-times weight — not a new gap, but a heavier instance of the existing one, worth naming now that F-006 exists | F-006 |
+| T-012 | Tampering / Elevation of privilege | A stolen bearer token is used after the legitimate user has logged out (API-012) | Continued account access after the user believed they were logged out | `Session.revoked_at` is checked on every authenticated call (not cached); a revoked session is rejected identically to an expired one | Session mechanism (`data-model.md`) |
 
 ## Abuse & safety-specific risks (ethical)
 
@@ -84,7 +90,7 @@ adoption scams), so this section is first-class, not a throwaway.
 
 ## Compliance obligations
 
-- **Data privacy (Philippines).** Whiskr collects and processes personal data (`auth_identifier`,
+- **Data privacy (Philippines).** Whiskr collects and processes personal data (`fb_user_id`,
   precise device/user location, push tokens) from users physically in the Philippines (NCR/Greater
   Manila Area per `idea.md` §2). The Philippines Data Privacy Act of 2012 (RA 10173) is therefore
   **plausibly applicable** — **[assumption]**: no legal review is recorded in any seed doc, and this
@@ -141,9 +147,10 @@ flags it as "the single most consequential, hardest-to-reverse choice in this do
   (system-design). Referenced via environment/secret store, never inlined.
 - **Database credentials** for the shared relational store — referenced via secret store; no value
   belongs in any doc or repo.
-- **Session/auth-signing secret** — the auth *mechanism* is resolved (Facebook OAuth, `ADR-0001`),
-  but the signing key for Whiskr's own issued bearer token is still `[assumption]` (format/algorithm
-  undecided); whatever is chosen, the signing key must be rotated and never inlined.
+- **Session token** — RESOLVED: no signing secret is needed at all, since the token is an opaque
+  random value hashed and looked up in the `Session` table (not a signed/verifiable-offline JWT).
+  The token generation source must be a cryptographically secure random generator — a requirement on
+  the implementation, not a secret to store.
 - **Facebook App Secret** — used server-side if the chosen Graph API verification call requires it
   (e.g., an app-access-token for the `debug_token` check, T-010) — referenced via secret store,
   never inlined; distinct from any per-user Facebook access token, which is never persisted at all.
@@ -200,3 +207,5 @@ flags it as "the single most consequential, hardest-to-reverse choice in this do
       `UserLocation.lat/lng`. — {date}
 - [ ] No Facebook user access/refresh token is ever persisted (verify-then-discard only at login,
       `ADR-0001`). — {date}
+- [ ] `Session.token_hash` (never the raw token) is the only thing persisted for a bearer token; no
+      API response ever echoes back a stored `token_hash`. — {date}

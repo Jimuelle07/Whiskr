@@ -10,10 +10,11 @@ The Backend API is the single contract boundary the Mobile Client (iOS + Android
 (`system-design.md` — "Backend API ... exposes_api: true"). It owns listing read/search/filter
 (F-001), submission intake (F-002), multi-cat batch submission (F-006), status transitions
 (F-003/INV-002), location-based alert subscription and push-token registration (F-004), the
-identity anchor / account layer that F-005 and INV-001 depend on, and Facebook-OAuth account
-login/signup and profile management (`ADR-0001`). The scraper and alerting workers write to the
-same data store through this API's listing-write path (`system-design.md` — "both pipelines
-converge on the same `Listing` write path"); this spec covers the mobile-facing surface only.
+identity anchor / account layer that F-005 and INV-001 depend on, Facebook-OAuth account
+login/logout and profile management (`ADR-0001`), and photo-upload URL issuance (F-002/F-006's
+`photo_url` requirement). The scraper and alerting workers write to the same data store through
+this API's listing-write path (`system-design.md` — "both pipelines converge on the same `Listing`
+write path"); this spec covers the mobile-facing surface only.
 
 - **Base URL / namespace:** `[assumption]` — no domain/host is named in the seed; proposed
   `https://api.whiskr.app/v1` pending the deployment topology decision in `system-design.md`.
@@ -33,10 +34,11 @@ converge on the same `Listing` write path"); this spec covers the mobile-facing 
   consistent with `system-design.md`'s "feed still browsable without location permission" (device
   location and account auth are separate gates; browsing needs neither). `[assumption]` — the seed
   never states whether an account is mandatory just to browse.
-- **Authenticated endpoints:** API-003 through API-006, API-008 — creating a listing, changing
-  status, or registering a location/push token requires a resolved `User.id`, since these actions
-  are attributed via `Listing.submitted_by`, `StatusHistory.changed_by`, `UserLocation.user_id`,
-  and `PushToken.user_id` respectively (`data-model.md`).
+- **Authenticated endpoints:** API-003 through API-006, API-008 through API-012 — creating a
+  listing/batch, changing status, registering a location/push token, editing a profile, requesting
+  an upload URL, or logging out all require a resolved `User.id`, since these actions are
+  attributed via `Listing.submitted_by`, `StatusHistory.changed_by`, `UserLocation.user_id`,
+  `PushToken.user_id`, or the caller's own `Session`/`User` row respectively (`data-model.md`).
 - **Role gate:** `User.is_admin` (`data-model.md`) gates BR-004 — changing a status on a listing you
   did not submit. Enforced server-side only (`system-design.md` — "Server-enforced business
   rules"), never mirrored/trusted client-side.
@@ -168,10 +170,38 @@ converge on the same `Listing` write path"); this spec covers the mobile-facing 
   in Open questions, not silently skipped.
 - **Request schema:** `{ fb_access_token: text }` — the client-obtained Facebook access token.
 - **Response schema:** `200 OK` (existing user) or `201 Created` (new user) — `{ access_token: text,
-  user: { id, display_name, is_admin, location_opt_in } }`.
+  user: { id, display_name, is_admin, location_opt_in } }`. `access_token` is the **raw** Whiskr
+  session token; the backend stores only its hash (a new `Session` row, `data-model.md`) and never
+  returns it again on any subsequent read.
 - **Auth:** none (this endpoint issues auth).
 - **Errors:** `400` missing `fb_access_token`; `401` token invalid, expired, or (if `debug_token`
   verification is implemented) issued for a different Facebook App ID.
+
+### API-012 — DELETE /auth/sessions — Log out
+- **Serves:** completes the auth surface opened by API-007; session mechanism (`data-model.md`
+  `Session`, resolved 2026-09-18)
+- **Description:** Revokes the caller's current session by setting `Session.revoked_at` on the row
+  matching the presented bearer token's hash. A revoked session is rejected identically to an
+  expired one on every subsequent authenticated call (T-012).
+- **Request schema:** none (identity from bearer token).
+- **Response schema:** `204 No Content`.
+- **Auth:** Bearer required.
+- **Errors:** `401` token already invalid/expired/revoked (logging out twice is a no-op error, not a
+  crash — **[assumption]**: treated as `401` rather than a silent `204`, to confirm at scaffold).
+
+### API-011 — POST /uploads/photo-url — Request a photo upload URL
+- **Serves:** F-002, F-006 (BR-001's required `photo_url` field on both API-003 and API-010)
+- **Description:** Resolves the "Object/photo upload path" gap this spec previously left
+  unmodeled. The client requests a short-lived presigned upload URL, PUTs the photo bytes directly
+  to object storage (never through the Backend API), then submits the resulting `photo_url` on
+  API-003/API-010 as before. Keeps large binary uploads off the Backend API's own request path.
+- **Request schema:** `{ content_type: enum(image/jpeg, image/png, image/heic) }`.
+- **Response schema:** `201 Created` — `{ upload_url: text, photo_url: text, expires_at: timestamp }`
+  — `upload_url` is a presigned `PUT` target (**[assumption]** — object-store vendor unconfirmed,
+  `system-design.md` "an object store for photos"); `photo_url` is the resulting public/read URL to
+  submit on API-003/API-010 once the client's `PUT` to `upload_url` succeeds.
+- **Auth:** Bearer required.
+- **Errors:** `400` missing/invalid `content_type`; `401`.
 
 ### API-008 — GET /users/me — Current user profile
 - **Serves:** F-005 / INV-001 (supporting), F-003 (client needs `is_admin` to render/enable
@@ -258,8 +288,7 @@ operational capacity. Deprecation policy: none defined yet — MVP has no prior 
   `[assumption]`; no NFR or UX spec constrains them.
 - **Rate limiting:** no policy exists; see Rate limits above — now also relevant to API-010, which
   writes N listings per call (`security-compliance.md` T-011).
-- **Object/photo upload path:** `photo_url` on API-003/API-010 assumes the client already has a URL
-  from an out-of-band upload step; no upload endpoint or object-store contract is specified in
-  `data-model.md`/`system-design.md` to model here.
+- **~~Object/photo upload path~~ RESOLVED 2026-09-18:** API-011 issues a presigned upload URL; the
+  object-store *vendor* itself remains `[assumption]` (system-design.md), to confirm at scaffold.
 - **Machine-readable spec:** this Markdown contract has no OpenAPI/GraphQL/protobuf equivalent yet;
   flagged per the template's stated purpose.

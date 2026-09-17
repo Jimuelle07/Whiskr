@@ -6,6 +6,9 @@
 > dedup/staleness-suppression (F-001/F-003, INV-002), (2) location-based alert fanout (F-004),
 > (3) the FB-profile-link validation gate (F-005, INV-001). All components/entities below are
 > exactly the ones named in `system-design.md` and `data-model.md` — none invented here.
+> **Extended 2026-09-18** (same rigor, same rule — no invented components) to cover the auth
+> substrate resolved that day: (4) Facebook OAuth login/session issuance + logout (`ADR-0001`,
+> `Session` entity), (5) multi-cat batch report creation (F-006).
 
 ## Module breakdown
 
@@ -20,8 +23,16 @@
   Never mutates `status`; only `is_stale` (system-design's explicit non-conflation rule).
 - **Location-based alerting (worker)** — owns `createAlertAndFanout()` and `FanoutJob()`
   (Algorithm 2), triggered off the Listing Write Service's status-transition/creation event.
+- **Backend API — Auth Service** (added 2026-09-18, `ADR-0001`) — owns `verifyFacebookToken()`,
+  `loginWithFacebook()` (Algorithm 4), and `revokeSession()` (logout, API-012). The only component
+  that talks to Facebook's Graph API for token verification (distinct from the scraper, which polls
+  pages/groups — `system-design.md` Integration points).
+- **Backend API — Report Batch Service** (added 2026-09-18, F-006) — owns `createBatchListings()`
+  (Algorithm 5). Calls into the same Listing Write Service's `gateListingWrite()` once per cat, never
+  duplicating F-005/INV-001 enforcement.
 - **Data store** — `Listing`, `FacebookAnchor`, `ScrapedPost`, `StatusHistory`, `Alert`,
-  `AlertDelivery`, `UserLocation`, `PushToken` (all from `data-model.md`; no new entities).
+  `AlertDelivery`, `UserLocation`, `PushToken`, `Session`, `ReportBatch` (all from `data-model.md`;
+  the last two added 2026-09-18, no other new entities).
 
 ## Class / function-level design
 
@@ -44,6 +55,15 @@ sweepStaleListings(now: timestamp, staleness_window: duration) -> int         # 
 createAlertAndFanout(listing: Listing) -> Optional[Alert]                     # Algorithm 2
 findOptedInUsersWithinRadius(lat, lng, radius_km) -> Iterator[User]
 fanoutJob(alert_id: uuid) -> None
+
+# Auth Service (Backend API) — added 2026-09-18, ADR-0001
+verifyFacebookToken(fb_access_token: str) -> FacebookIdentity                 # calls Graph API
+loginWithFacebook(fb_access_token: str) -> tuple[User, str, bool]             # Algorithm 4; bool = is_new_user
+revokeSession(raw_token: str) -> None                                         # API-012 logout
+requireSession(raw_token: str) -> User                                       # every authenticated call's entry gate
+
+# Report Batch Service (Backend API) — added 2026-09-18, F-006
+createBatchListings(cats: list[ListingDraft], fb_profile_url: str, actor: User) -> ReportBatchResult  # Algorithm 5
 ```
 
 ## Algorithms
@@ -210,6 +230,91 @@ gateListingWrite(draft, actor):
 Complexity: O(1) pattern check + one resolvability call per candidate write; no batching needed
 (gate runs synchronously per write, on both the manual endpoint and the ingestion worker).
 
+### 4. Facebook OAuth login + session issuance / revocation (`ADR-0001`)
+
+```
+verifyFacebookToken(fb_access_token):
+    resp = graphAPI.get("/me", params={"access_token": fb_access_token, "fields": "id,name"})
+    if resp.status != 200:
+        raise AuthError(reason="invalid_or_expired_token")
+    # [assumption] app-id check — see security-compliance.md T-010; strongly recommended,
+    # not yet confirmed as implemented:
+    #   debug = graphAPI.get("/debug_token", params={"input_token": fb_access_token,
+    #                                                 "access_token": WHISKR_APP_ACCESS_TOKEN})
+    #   if debug.data.app_id != WHISKR_FB_APP_ID:
+    #       raise AuthError(reason="wrong_app_id")
+    return FacebookIdentity(fb_user_id=resp.id, name=resp.name)
+
+loginWithFacebook(fb_access_token):
+    identity = verifyFacebookToken(fb_access_token)      # raises AuthError on failure -> 401
+    user = User.find_by(fb_user_id=identity.fb_user_id)
+    is_new = user is None
+    if is_new:
+        user = User.insert(fb_user_id=identity.fb_user_id, display_name=identity.name,
+                            location_opt_in=false, is_admin=false)
+    raw_token = crypto.secure_random(32)                  # opaque token, never a JWT
+    Session.insert(user_id=user.id, token_hash=sha256(raw_token),
+                    expires_at=now() + 90_days)
+    return (user, raw_token, is_new)                      # raw_token returned to client ONCE
+
+revokeSession(raw_token):
+    session = Session.find_by(token_hash=sha256(raw_token))
+    if session is None or session.revoked_at is not None or session.expires_at < now():
+        raise AuthError(reason="already_invalid")          # API-012 -> 401, not a silent success
+    session.revoked_at = now()
+    session.save()
+
+requireSession(raw_token):
+    # the entry gate for every authenticated endpoint (API-003 onward)
+    session = Session.find_by(token_hash=sha256(raw_token))
+    if session is None or session.revoked_at is not None or session.expires_at < now():
+        raise AuthError(reason="unauthenticated")           # -> 401
+    return User.find(session.user_id)
+```
+Complexity: O(1) — a single indexed lookup (`Session.token_hash`, unique) per authenticated request;
+no in-memory session cache is assumed (each request re-checks `revoked_at`/`expires_at` directly,
+so a revoked token is rejected on the very next call, not after a cache TTL — this is what makes
+T-012's mitigation actually hold).
+
+### 5. Multi-cat batch report creation (F-006, BR-009)
+
+```
+createBatchListings(cats, fb_profile_url, actor):
+    if len(cats) < 2:
+        raise ValidationError(field="cats", reason="batch_requires_at_least_two")  # -> 400
+
+    result = validateFacebookAnchor(fb_profile_url)        # BR-009: validated ONCE for the batch
+    if not result.valid:
+        raise ValidationError(field="fb_profile_url", reason=result.reason)        # -> 422, no writes
+
+    begin transaction
+        batch = ReportBatch.insert(submitted_by=actor.id)
+        listings = []
+        for cat_draft in cats:                              # each cat independently satisfies BR-001
+            listing = Listing.insert(cat_draft.fields(), submitted_by=actor.id,
+                                       batch_id=batch.id, source="manual")
+            FacebookAnchor.insert(listing_id=listing.id, fb_profile_url=result.normalized_url,
+                                    resolved_at_submit=true)   # INV-001: same gate, per listing
+            listings.append(listing)
+        # any single cat_draft failing BR-001 field validation raises inside the loop, aborting
+        # the whole transaction — FRD-F006-01's all-or-nothing rule
+    commit transaction
+
+    for listing in listings:
+        if listing.status == 'missing':
+            createAlertAndFanout(listing)    # Algorithm 2, per cat independently, async
+    return ReportBatchResult(batch_id=batch.id, listings=listings)
+```
+Complexity: O(N) for N cats in the batch — one `FacebookAnchor` resolvability call total (shared,
+per BR-009), not per cat. `createBatchListings()` reuses `validateFacebookAnchor()` from Algorithm 3
+directly (the same INV-001 check, called once instead of once-per-cat) and then repeats
+`gateListingWrite()`'s *insert* shape (`Listing` + `FacebookAnchor` in one transaction) per cat with
+the already-validated result — it does not re-run `gateListingWrite()` itself, which would
+re-validate the anchor N times and violate BR-009's "once per batch" rule. This is the one
+deliberate divergence from "one shared gate for both pipelines" (`system-design.md`), and it exists
+specifically to satisfy BR-009, not to duplicate INV-001 enforcement logic — the validation function
+is still shared; only the per-cat write loop is new.
+
 ## Sequence diagrams
 
 ```
@@ -246,6 +351,28 @@ loop per user (paginated):
   Alerting worker -> Push provider: send(token)
   Push provider --> Alerting worker: ack/fail
   Alerting worker -> Data store: UPDATE AlertDelivery.delivered_at (on success only)
+
+Facebook OAuth login/logout (ADR-0001, API-007/API-012):
+Mobile Client -> Facebook Login SDK: on-device login -> fb_access_token
+Mobile Client -> Backend API: POST /auth/facebook { fb_access_token }
+Backend API -> Facebook Graph API: GET /me?access_token=...
+  [invalid/expired] Backend API -> Mobile Client: 401
+  [valid] Backend API -> Data store: find-or-create User by fb_user_id
+          Backend API -> Data store: INSERT Session(token_hash=sha256(raw_token))
+          Backend API -> Mobile Client: 200/201 { access_token: raw_token, user }
+...
+Mobile Client -> Backend API: DELETE /auth/sessions  (Authorization: Bearer <raw_token>)
+Backend API -> Data store: UPDATE Session SET revoked_at = now() WHERE token_hash = sha256(token)
+Backend API -> Mobile Client: 204
+
+Multi-cat batch report (F-006, API-010):
+Mobile Client -> Backend API: POST /listings/batch { fb_profile_url, cats: [...] }
+Backend API -> validateFacebookAnchor(fb_profile_url): pattern + resolvability check (once)
+  [invalid] Backend API -> Mobile Client: 422 (whole batch rejected, no writes)
+  [valid]   Backend API -> Data store: BEGIN; INSERT ReportBatch;
+              loop per cat: INSERT Listing(batch_id=...) + INSERT FacebookAnchor; COMMIT
+            Backend API -> Mobile Client: 201 { batch_id, listings: [...] }
+            Backend API -> Alerting worker: enqueue per cat where status == missing
 ```
 
 ## Error-handling strategy
@@ -271,6 +398,13 @@ loop per user (paginated):
 - **Staleness sweep:** pure batch `UPDATE`, no per-row failure mode; a failed sweep run simply
   leaves listings visible one cycle longer — never mutates `status`, so it can never trip INV-002
   in the failure case either.
+- **Facebook token verification failure:** `verifyFacebookToken()` raises before any `User`/`Session`
+  row is touched — no partial account/session state; the client sees a plain `401` and re-attempts
+  the Facebook Login SDK flow, never a Whiskr-side retry loop.
+- **Batch report partial failure:** the loop in `createBatchListings()` runs inside one transaction;
+  any single cat's BR-001 field validation failure aborts and rolls back every `Listing`/
+  `FacebookAnchor`/`ReportBatch` insert in that call — never an N-1-of-N partial batch
+  (FRD-F006-01).
 
 ## Key decisions
 
@@ -290,3 +424,9 @@ loop per user (paginated):
   Algorithm 2; not resolved by invention, left for the data-model owner.
 - **Staleness window value (BR-005)** — no number exists in any upstream doc; open question, not
   a confident target.
+- **Opaque hashed session tokens over JWT** — chosen so logout (API-012) is a true revocation, not a
+  denylist workaround; costs one indexed DB lookup per authenticated request instead of stateless
+  local verification, judged worth it at MVP scale (`decision-ledger.md`).
+- **Facebook-anchor validated once per batch, not once per cat** (`createBatchListings()`) — a
+  deliberate, named divergence from "one shared gate for both pipelines" specifically to satisfy
+  BR-009 without N redundant resolvability calls against the same URL in one request.

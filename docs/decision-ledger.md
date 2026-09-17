@@ -57,6 +57,26 @@ to UNVALIDATED) · superseding ADR (if any). Pivot types (from the design of rec
 Several entries below are foundational Key-phase decisions rather than pivots from a prior state —
 where none of the enumerated types fit, the entry says so plainly rather than forcing a mismatch.
 
+### 2026-09-18 — Session mechanism resolved: opaque, hashed, revocable bearer tokens (not JWT)
+- **Type:** decision (session-mechanism selection — no enumerated pivot type fits cleanly)
+- **Change:** `[assumption]` no token/session scheme named → a new `Session` entity (`data-model.md`)
+  backs every bearer token: the raw token is returned once at login (API-007) and never stored;
+  only its SHA-256 hash is persisted, alongside `expires_at` (90-day fixed) and a `revoked_at` set by
+  a new logout endpoint (API-012).
+- **Why:** a real logout/revocation capability was added to complete the auth backend (login without
+  a way to log out is an incomplete auth surface); a stateless JWT cannot be truly revoked without an
+  equivalent denylist data-store lookup anyway, so an opaque server-side session token is simpler for
+  the same guarantee.
+- **Alternatives rejected:** JWT (rejected — no clean revocation without a denylist, which duplicates
+  the `Session` table's job with extra complexity); storing the raw token instead of its hash
+  (rejected — same reasoning as password hashing: a data-store leak should not yield directly
+  reusable credentials).
+- **Invalidated:** the `[assumption]` "session mechanism" line in `security-compliance.md` Authn/authz
+  model and the "session/auth-signing secret" line in Secrets handling — both resolved by this
+  decision.
+- **Recorded as:** none — additive schema change, does not meet the ADR triple gate (reversible via a
+  routine migration, not a product-facing trade-off).
+
 ### 2026-09-18 — Auth mechanism resolved: Facebook OAuth only, no app-side password
 - **Type:** decision (auth-mechanism selection — no enumerated pivot type fits cleanly)
 - **Change:** `User.auth_identifier` `[assumption]` (phone/email/OAuth, unresolved) → Facebook OAuth

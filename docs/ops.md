@@ -80,9 +80,10 @@ and data flow — not invented metrics:
   as a monitoring signal rather than only an audit one.
 - **Mobile Client** — crash rate and push-permission/location-permission denial rate, since
   system-design notes the client must degrade gracefully (no crash) on location denial.
-- Logging must exclude `PushToken.token`, `User.auth_identifier`, and precise `UserLocation.lat/lng`
-  from general application logs, per `security-compliance.md`'s "Audit & logging" section — reused
-  verbatim as a logging constraint, not re-derived.
+- Logging must exclude `PushToken.token`, `User.fb_user_id`, `Session.token_hash`, the client-supplied
+  `fb_access_token` at login, and precise `UserLocation.lat/lng` from general application logs, per
+  `security-compliance.md`'s "Audit & logging" section — reused verbatim as a logging constraint, not
+  re-derived.
 - **Monitoring/alerting tooling itself (vendor, dashboard product) is not named in any upstream doc
   — [assumption].** No specific APM or log-aggregation vendor is chosen here; this is an operational
   tooling decision, not a product requirement, and is left open pending team preference/budget at
