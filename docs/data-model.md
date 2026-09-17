@@ -1,0 +1,190 @@
+# Data Model / Schema
+
+> **Purpose:** the data. Entities, relationships, constraints, and privacy classification.
+> Traces back to: system design, technical design, API spec.
+
+## Entities & relationships (ERD)
+```
+ User ──1───N── Listing            (submitted_by; nullable for scraped listings)
+ User ──1───1── UserLocation        (opt-in radius subscription, for F-004/UJ-003)
+ User ──1───N── PushToken           (a user may have multiple devices)
+
+ Listing ──1───1── FacebookAnchor   (identity anchor; INV-001/F-005/BR-002/BR-008)
+ Listing ──1───N── StatusHistory    (every transition; enforces/audits INV-002)
+ Listing ──0..1─1── ScrapedPost     (present only when source = scraped; INV-003 attribution)
+ Listing ──1───N── Alert            (fired when status → missing; F-004)
+
+ ScrapeSource ──1───N── ScrapedPost (a configured FB page/group produces many posts)
+
+ Alert ──1───N── AlertDelivery      (fanout per opted-in nearby user; BR-006)
+ AlertDelivery ──N───1── User
+
+ Listing ──1───0..1── Listing       (self-ref: original ←→ duplicate resolved into it, F-001 dedup)
+```
+
+Two write paths (scraper, manual — per `system-design.md`) converge on the single `Listing` entity
+so status/staleness/alerting logic (F-003, F-004, INV-002) is never duplicated across paths.
+
+## Schema / field definitions
+
+### User
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| display_name | text | no | — | Shown alongside listings the user submitted |
+| auth_identifier | text | no | — | **[assumption]** — phone/email/OAuth identifier; auth mechanism not specified in seed, to confirm at scaffold |
+| location_opt_in | boolean | no | false | Gate for UJ-002/UJ-003 location features |
+| is_admin | boolean | no | false | BR-004/INV-002 gate — who may change another submitter's status; provisioning is `[assumption]`, no admin model in seed |
+| created_at | timestamp | no | now() | |
+| updated_at | timestamp | no | now() | |
+
+### UserLocation
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| user_id | uuid (FK → User.id) | no | — | One active subscription per user |
+| lat | double | no | — | |
+| lng | double | no | — | |
+| radius_km | numeric | no | 5 | Default per BR-006 / `usability.md` §1 confirmation copy |
+| updated_at | timestamp | no | now() | |
+
+### PushToken
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| user_id | uuid (FK → User.id) | no | — | |
+| token | text | no | — | Opaque device push token (APNs/FCM — `[assumption]` vendor) |
+| platform | enum(ios, android) | no | — | |
+| created_at | timestamp | no | now() | |
+
+### Listing
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| kind | enum(adoption, lost, found) | no | — | Matches Report-a-cat form's Status field (BR-001) |
+| status | enum(available, on_hold, adopted, found, missing, resolved) | no | `available` (adoption) / `missing` (lost) / `found` (found) at creation | BR-003 enum; transitions enforce INV-002 |
+| source | enum(scraped, manual) | no | — | Distinguishes the two write paths (F-001 vs. F-002) |
+| submitted_by | uuid (FK → User.id) | yes | null | Null only when `source = scraped` and no matching user account exists |
+| description | text | no | — | BR-001 required field |
+| photo_url | text | no | — | BR-001 required field; storage location `[assumption]`, object store not named in seed |
+| location_lat | double | no | — | BR-001 required field |
+| location_lng | double | no | — | BR-001 required field |
+| location_label | text | yes | null | Free-text address/area label shown in UI |
+| is_stale | boolean | no | false | Set by the staleness sweep (BR-005); does **not** mutate `status` — keeps INV-002 (explicit resolution) distinct from time-based suppression |
+| duplicate_of | uuid (FK → Listing.id) | yes | null | Self-reference; set when the dedup match (F-001) collapses a re-scraped post into an existing listing |
+| resolved_at | timestamp | yes | null | Set only on an explicit BR-004 status transition to `resolved`/`adopted`/`found` |
+| resolved_by | uuid (FK → User.id) | yes | null | Submitter or admin who resolved it (BR-004) |
+| created_at | timestamp | no | now() | |
+| updated_at | timestamp | no | now() | |
+
+### FacebookAnchor
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| listing_id | uuid (FK → Listing.id, unique) | no | — | One anchor per listing; row's existence is the INV-001 gate — a `Listing` write SHALL NEVER commit without one (BR-002/BR-008) |
+| fb_profile_url | text | no | — | Visible link back to a real Facebook profile or page |
+| resolved_at_submit | boolean | no | true | Records that BR-002/BR-008 validation ran before publish, for audit |
+| created_at | timestamp | no | now() | |
+
+### ScrapeSource
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| fb_page_or_group_url | text | no | — | Configured NCR/Greater-Manila-Area page/group |
+| last_scraped_at | timestamp | yes | null | |
+| status | enum(active, degraded, blocked) | no | `active` | `blocked`/`degraded` values feed the technical kill-criterion signal (`idea.md` §9) |
+
+### ScrapedPost
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| scrape_source_id | uuid (FK → ScrapeSource.id) | no | — | |
+| listing_id | uuid (FK → Listing.id) | yes | null | Set once normalized into a `Listing`; null briefly during ingest |
+| original_post_url | text | no | — | The exact source URL; SHALL NEVER be dropped before/after normalization (enforces INV-003) |
+| raw_content_snapshot | text | no | — | Retained for audit/dedup, not shown verbatim in UI beyond the link |
+| dedup_hash | text | no | — | Content fingerprint used for cross-page/group dedup (F-001) |
+| scraped_at | timestamp | no | now() | |
+
+### StatusHistory
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| listing_id | uuid (FK → Listing.id) | no | — | |
+| old_status | enum (same set as Listing.status) | no | — | |
+| new_status | enum (same set as Listing.status) | no | — | |
+| changed_by | uuid (FK → User.id) | yes | null | Null for system-driven staleness flags (which do not touch `status` — see `Listing.is_stale`); populated for every explicit BR-004 transition |
+| changed_at | timestamp | no | now() | Append-only; this table is the audit trail INV-002 verification (TC-N02) reads |
+
+### Alert
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| listing_id | uuid (FK → Listing.id) | no | — | Fired when `status` transitions to/is created as `missing` |
+| radius_km | numeric | no | 5 | BR-006 default |
+| triggered_at | timestamp | no | now() | |
+
+### AlertDelivery
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| alert_id | uuid (FK → Alert.id) | no | — | |
+| user_id | uuid (FK → User.id) | no | — | Recipient within radius at trigger time |
+| delivered_at | timestamp | yes | null | Null until the push provider confirms/attempts delivery |
+| opened_at | timestamp | yes | null | Set if/when the user taps the notification |
+
+## Constraints & indexes
+- `Listing.id`, all other entity `id`s — primary key, uuid.
+- `FacebookAnchor.listing_id` — unique + not-null-enforced-at-write (application-level gate, since
+  the row's *absence* is what INV-001 forbids; a `Listing` write and its `FacebookAnchor` write are
+  one transaction).
+- `StatusHistory` — append-only (no update/delete path); insert-only index on `(listing_id,
+  changed_at)` for the audit read (TC-N02) and for reconstructing "has this ever been marked
+  resolved" without trusting a mutable field alone.
+- `Listing(location_lat, location_lng)` — geo index (e.g., PostGIS GiST or equivalent —
+  `[assumption]`, tied to the system-design store choice) to serve UJ-002 filter and the F-004
+  alert-fanout radius query efficiently.
+- `Listing(status, is_stale, kind)` — composite index for the default feed query (exclude
+  `resolved`, exclude `is_stale = true`, filter by `kind`).
+- `ScrapedPost.dedup_hash` — index for the F-001 dedup match on ingest.
+- `ScrapeSource.fb_page_or_group_url` — unique (one row per configured source).
+- `AlertDelivery(alert_id, user_id)` — unique (no duplicate delivery record per user per alert).
+- Foreign keys: `Listing.submitted_by → User.id`, `Listing.resolved_by → User.id`,
+  `Listing.duplicate_of → Listing.id` (self-referential, nullable), `FacebookAnchor.listing_id →
+  Listing.id`, `ScrapedPost.listing_id → Listing.id`, `ScrapedPost.scrape_source_id →
+  ScrapeSource.id`, `StatusHistory.listing_id → Listing.id`, `Alert.listing_id → Listing.id`,
+  `AlertDelivery.alert_id → Alert.id`, `AlertDelivery.user_id → User.id`, `UserLocation.user_id →
+  User.id`, `PushToken.user_id → User.id`.
+
+## Retention & privacy classification
+- **User.auth_identifier** — PII. Retention: life of the account; deleted on account deletion
+  request. **[assumption]** — no data-retention policy is stated in the seed; this follows standard
+  practice, to confirm with product owner/legal at scaffold (a `security-compliance.md` doc is not
+  in this generation batch but would own this formally when `exposed_surface: true` is acted on).
+- **Listing.location_lat/lng, location_label** — PII-adjacent (can reveal a submitter's approximate
+  home/found location). Classification: internal; visible to app users by product design (the
+  location is the point of the listing), but precise-enough-to-dox precision should be reviewed —
+  **[assumption]**, no precision/fuzzing rule is specified in the seed.
+- **Listing.photo_url** — internal/public (shown in-app by design).
+- **FacebookAnchor.fb_profile_url** — public by definition (it is a link to a public profile/page);
+  classification: public.
+- **UserLocation.lat/lng** — PII. Used only for radius matching (F-004); not shown to other users.
+  Retention: until opt-out or account deletion.
+- **PushToken.token** — secret-adjacent (device credential). Retention: until device
+  unregisters/token rotates; not human-readable data but treated as sensitive.
+- **ScrapedPost.raw_content_snapshot** — internal (retained for dedup/audit, not republished
+  verbatim beyond the original post link per INV-003).
+- No payment or health data exists in this model (`idea.md` §10 excludes monetization).
+
+## Migration notes
+- **[assumption]** — no existing schema/data exists yet (greenfield build, `team_size: 1`,
+  `time_budget: 2w`); there is no legacy data to migrate or backfill at MVP.
+- Forward compatibility to note for F-101/F-102/F-103/F-104 (final-product features, not built at
+  MVP): `Listing` already carries fields (`kind`, `photo_url`, `location_*`) that F-101's photo
+  matching would read without a breaking schema change; F-102's badge program would add a column to
+  `User` (e.g., `verified_badge`) additively; F-103's messaging would be a new entity, not a change
+  to existing tables; F-104's partner-API feed would add a new `source` enum value (`partner_api`)
+  alongside `scraped`/`manual` — additive, not breaking. These are forward-compatibility notes only,
+  not commitments — the features themselves are out of MVP scope per the PRD non-goals.
+- Any schema change to `Listing.status`'s enum or to `StatusHistory`'s append-only guarantee is a
+  change to INV-002 enforcement and must be treated as a logged pivot (per `idea.md` §9 note on
+  invariants), not a routine migration.

@@ -1,0 +1,4 @@
+# Read AGENTS.md first — it is the single source of project instructions.
+# Scoped, path-specific rules live in .cursor/rules/*.mdc and load only when a matching file is open.
+# The handoff + Build-First protocol in AGENTS.md applies to every edit: build then verify, stay inside the
+# task's write scope, never edit a test to make it pass, three failed attempts → stop and escalate.

@@ -1,0 +1,38 @@
+---
+description: Stack-currency guardrail. Verify framework/SDK conventions against pinned-version docs before emitting code; never from memory.
+globs:
+  - "backend/**/*.ts"
+  - "mobile/**/*.ts"
+  - "mobile/**/*.tsx"
+alwaysApply: false
+---
+
+# Stack currency (verify before coding)
+
+- **Do not emit framework code from training memory.** Before writing against a pinned library,
+  confirm the current convention in *that version's* official docs. If you cannot verify, say so
+  and mark the line to confirm — never ship a plausible-but-stale API.
+- This register **overrides** your training memory when they conflict.
+
+Whiskr's stack, as currently known (all **[assumption]** — none of it is decided/pinned yet;
+`system-design.md`'s "Key technology choices" table and `qa-test-plan.md` both flag it "to confirm
+at scaffold"):
+
+| Area | Assumed choice | Status |
+|---|---|---|
+| Backend runtime/language | Node.js + TypeScript | **[assumption]** — `TASK-001` picks the exact config |
+| Backend test runner | Jest | **[assumption]** — `TASK-001` scaffolds it |
+| Mobile client | React Native (iOS + Android) | **[assumption]** — `TASK-002` picks the exact config |
+| Mobile e2e runner | Detox | **[assumption]** — `TASK-002` scaffolds it |
+| Data store | PostgreSQL + PostGIS (geo-radius queries, F-004/BR-006) | **[assumption]** — no infra provider is named anywhere in the seed |
+| Push provider | APNs/FCM | **[assumption]** — vendor unconfirmed (`system-design.md` "Integration points") |
+
+| ❌ Stale / from memory | ✅ Current (this project) | Why |
+|------------------------|---------------------------|-----|
+| — | — | No stale-API case has been caught yet; self-anneal — add a row the first time one is caught in review. |
+
+- Pinned versions: **not yet pinned** — confirm the actual installed version once `TASK-001`/
+  `TASK-002` land, then update this file; do not assume a version from memory in the meantime.
+- Whiskr does not compute numbers (`context.md` `computes_numbers: false`) — no `docs/methods.md`
+  exists, so the EQ-###/confidence citation rule below does not apply to this project; kept only
+  as a note in case that changes.
