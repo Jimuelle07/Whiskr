@@ -90,6 +90,8 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
 | TC-008 | unit + Jest | `backend/src/auth/__tests__/facebook-token-verify.test.ts` | `npm --prefix backend test -- auth/facebook-token-verify -t "T-010"` | task | stdout / Jest report |
 | TC-009 | integration + Jest + supertest | `backend/src/uploads/__tests__/photo-url.integration.test.ts` | `npm --prefix backend test -- uploads/photo-url.integration` | task | stdout / Jest report |
 | TC-010 | integration + Jest + supertest | `backend/src/auth/__tests__/logout.integration.test.ts` | `npm --prefix backend test -- auth/logout.integration -t "T-012"` | task | stdout / Jest report |
+| TC-011 | integration + Jest + supertest | `backend/src/auth/__tests__/delete-account.integration.test.ts` | `npm --prefix backend test -- auth/delete-account.integration` | task | stdout / Jest report |
+| TC-012 | integration + Jest + supertest | `backend/src/users/__tests__/location-opt-out.integration.test.ts` | `npm --prefix backend test -- users/location-opt-out.integration` | task | stdout / Jest report |
 | TC-101 | e2e (deferred) | `mobile/e2e/photo-match.e2e.ts` (not yet created) | `npm --prefix mobile run e2e -- photo-match` | post-MVP phase | N/A — not scaffolded |
 | TC-102 | integration (deferred) | `backend/src/badges/__tests__/verify.integration.test.ts` (not yet created) | `npm --prefix backend test -- badges/verify.integration` | post-MVP phase | N/A — not scaffolded |
 | TC-103 | e2e (deferred) | `mobile/e2e/messaging.e2e.ts` (not yet created) | `npm --prefix mobile run e2e -- messaging` | post-MVP phase | N/A — not scaffolded |
@@ -237,6 +239,32 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
   `401` — identical to an expired-token response, not a stale-cache `200`.
 - **Automation:** `backend/src/auth/__tests__/logout.integration.test.ts` · `npm --prefix backend
   test -- auth/logout.integration -t "T-012"` · red on current codebase (no auth module exists yet).
+
+### TC-011 — account deletion revokes sessions and orphans (not deletes) submitted listings (BR-012)
+- **Covers:** API-015, BR-012
+- **Level:** integration
+- **Preconditions / controlled data:** a signed-in test user who has submitted at least one
+  `Listing`, has an active `Session`, a `UserLocation` row, and a `PushToken` row.
+- **Steps:** call `DELETE /users/me`; then (a) attempt any authenticated call reusing the
+  now-deleted user's old session token, and (b) GET the listing the user submitted.
+- **Expected:** the account-deletion call returns `204`; the reused session token now returns `401`
+  (T-012 semantics — same as a revoked/expired session); `UserLocation`/`PushToken` rows for that
+  user no longer exist; the listing is still returned by the feed/detail read, with
+  `submitted_by: null`.
+- **Automation:** `backend/src/auth/__tests__/delete-account.integration.test.ts` · `npm --prefix
+  backend test -- auth/delete-account.integration` · red on current codebase.
+
+### TC-012 — location opt-out deletes the subscription and flips the opt-in flag (API-013)
+- **Covers:** API-013, F-004 (completes API-005's retention promise)
+- **Level:** integration
+- **Preconditions / controlled data:** a signed-in test user with an active `UserLocation` row
+  (`location_opt_in: true`).
+- **Steps:** call `DELETE /users/me/location`; then GET `/users/me`.
+- **Expected:** `204` on the opt-out call; the profile read shows `location_opt_in: false`; a
+  fixture `missing` listing created afterward within the old radius produces no `AlertDelivery` row
+  for this user (the alert-fanout query no longer finds them).
+- **Automation:** `backend/src/users/__tests__/location-opt-out.integration.test.ts` · `npm --prefix
+  backend test -- users/location-opt-out.integration` · red on current codebase.
 
 ### TC-101 — photo-based match suggestion (deferred, post-MVP)
 - **Covers:** F-101

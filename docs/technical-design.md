@@ -64,6 +64,11 @@ requireSession(raw_token: str) -> User                                       # e
 
 # Report Batch Service (Backend API) — added 2026-09-18, F-006
 createBatchListings(cats: list[ListingDraft], fb_profile_url: str, actor: User) -> ReportBatchResult  # Algorithm 5
+
+# Account lifecycle (Backend API) — added 2026-09-18, BR-012
+deleteAccount(actor: User) -> None                                            # API-015
+optOutOfLocation(actor: User) -> None                                         # API-013
+unregisterPushToken(token_id: uuid, actor: User) -> None                      # API-014
 ```
 
 ## Algorithms
@@ -314,6 +319,38 @@ re-validate the anchor N times and violate BR-009's "once per batch" rule. This 
 deliberate divergence from "one shared gate for both pipelines" (`system-design.md`), and it exists
 specifically to satisfy BR-009, not to duplicate INV-001 enforcement logic — the validation function
 is still shared; only the per-cat write loop is new.
+
+### 6. Account deletion cascade (BR-012)
+
+```
+deleteAccount(actor):
+    begin transaction
+        Session.delete_all(user_id=actor.id)              # immediate logout everywhere
+        UserLocation.delete(user_id=actor.id)              # if present
+        PushToken.delete_all(user_id=actor.id)
+        Listing.update_all(WHERE submitted_by=actor.id, SET submitted_by=null)  # BR-012: never
+                                                             # cascade-delete a listing itself
+        User.delete(actor.id)
+    commit transaction
+
+optOutOfLocation(actor):
+    UserLocation.delete(user_id=actor.id)   # no-op success if none exists ([assumption])
+    actor.location_opt_in = false
+    actor.save()
+
+unregisterPushToken(token_id, actor):
+    token = PushToken.find(token_id)
+    if token is None:
+        raise NotFoundError()                              # -> 404
+    if token.user_id != actor.id:
+        raise ForbiddenError()                              # -> 403, never let a user unregister
+                                                             # another user's device
+    token.delete()
+```
+Complexity: O(1) plus O(k) for the `Listing.submitted_by` bulk update, where k = the user's own
+listing count (typically small at MVP scale, not a hot path). One transaction so a crash mid-delete
+never leaves a half-deleted account (e.g., sessions revoked but the `User` row still present, or
+vice versa).
 
 ## Sequence diagrams
 

@@ -41,8 +41,8 @@ _(From `idea.md` §2; single target segment, two situational modes.)_
   via Facebook OAuth, and lands on Home/Feed with an account (display name sourced from Facebook, no
   password to set or remember — `ADR-0001`).
 - **UJ-006** — View/edit profile: a signed-in user opens their profile, sees display name, admin
-  status, and location-alert opt-in state, can edit their display name (BR-010), and can log out
-  (BR-011).
+  status, and location-alert opt-in state, can edit their display name (BR-010), opt out of
+  location-based alerts entirely, log out (BR-011), or delete their account (BR-012).
 
 ## Feature list (with priorities)
 <!-- Reuse F-### from idea.md §7 exactly. Do NOT invent feature IDs here. Every row gets a TC. -->
@@ -93,6 +93,11 @@ _(From `idea.md` §2; single target segment, two situational modes.)_
 - **BR-011** — A signed-in user MAY log out (UJ-006), immediately revoking their current session
   token; a revoked token SHALL be rejected on every subsequent authenticated call, identically to an
   expired one (`security-compliance.md` T-012).
+- **BR-012** — A signed-in user MAY delete their account (UJ-006). Deletion SHALL revoke every
+  session, delete the user's `UserLocation` and `PushToken` rows, and set `submitted_by` to null on
+  every listing the user submitted — the listings themselves SHALL NOT be deleted (other users may
+  be relying on an open adoption or active missing-cat listing; only the account's own identity is
+  removed).
 
 ## Hard rules / must-never (invariants — `INV-###`)
 - **INV-001** — the system SHALL NEVER publish a post (scraped or manual) that does not carry a

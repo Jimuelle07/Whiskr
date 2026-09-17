@@ -11,8 +11,8 @@ The Backend API is the single contract boundary the Mobile Client (iOS + Android
 (F-001), submission intake (F-002), multi-cat batch submission (F-006), status transitions
 (F-003/INV-002), location-based alert subscription and push-token registration (F-004), the
 identity anchor / account layer that F-005 and INV-001 depend on, Facebook-OAuth account
-login/logout and profile management (`ADR-0001`), and photo-upload URL issuance (F-002/F-006's
-`photo_url` requirement). The scraper and alerting workers write to the same data store through
+login/logout/deletion and profile management (`ADR-0001`), location/push-token opt-out, and
+photo-upload URL issuance (F-002/F-006's `photo_url` requirement). The scraper and alerting workers write to the same data store through
 this API's listing-write path (`system-design.md` — "both pipelines converge on the same `Listing`
 write path"); this spec covers the mobile-facing surface only.
 
@@ -34,11 +34,12 @@ write path"); this spec covers the mobile-facing surface only.
   consistent with `system-design.md`'s "feed still browsable without location permission" (device
   location and account auth are separate gates; browsing needs neither). `[assumption]` — the seed
   never states whether an account is mandatory just to browse.
-- **Authenticated endpoints:** API-003 through API-006, API-008 through API-012 — creating a
-  listing/batch, changing status, registering a location/push token, editing a profile, requesting
-  an upload URL, or logging out all require a resolved `User.id`, since these actions are
-  attributed via `Listing.submitted_by`, `StatusHistory.changed_by`, `UserLocation.user_id`,
-  `PushToken.user_id`, or the caller's own `Session`/`User` row respectively (`data-model.md`).
+- **Authenticated endpoints:** API-003 through API-006, API-008 through API-015 — creating a
+  listing/batch, changing status, registering/unregistering a location or push token, editing or
+  deleting a profile/account, requesting an upload URL, or logging out all require a resolved
+  `User.id`, since these actions are attributed via `Listing.submitted_by`, `StatusHistory.changed_by`,
+  `UserLocation.user_id`, `PushToken.user_id`, or the caller's own `Session`/`User` row respectively
+  (`data-model.md`).
 - **Role gate:** `User.is_admin` (`data-model.md`) gates BR-004 — changing a status on a listing you
   did not submit. Enforced server-side only (`system-design.md` — "Server-enforced business
   rules"), never mirrored/trusted client-side.
@@ -188,6 +189,44 @@ write path"); this spec covers the mobile-facing surface only.
 - **Auth:** Bearer required.
 - **Errors:** `401` token already invalid/expired/revoked (logging out twice is a no-op error, not a
   crash — **[assumption]**: treated as `401` rather than a silent `204`, to confirm at scaffold).
+
+### API-013 — DELETE /users/me/location — Opt out of location-based alerts
+- **Serves:** F-004 (completes API-005's promise in `data-model.md`: "retained until opt-out or
+  account deletion" — no endpoint previously existed for the opt-out half)
+- **Description:** Deletes the caller's `UserLocation` row and sets `User.location_opt_in = false`.
+  Distinct from API-005 (which upserts/updates the subscription): this is a full opt-out, not an
+  update to a new radius.
+- **Request schema:** none (identity from bearer token).
+- **Response schema:** `204 No Content`.
+- **Auth:** Bearer required.
+- **Errors:** `401`. (No `404` — opting out when no subscription exists is a no-op success, not an
+  error — **[assumption]**, to confirm at scaffold.)
+
+### API-014 — DELETE /users/me/push-tokens/{id} — Unregister a device
+- **Serves:** F-004 (completes API-006's promise in `data-model.md`: "retained until device
+  unregisters or token rotates" — no endpoint previously existed for unregistering)
+- **Description:** Deletes one `PushToken` row (e.g., the user logged out of one device, or
+  uninstalled the app on it) without affecting the account or its other registered devices.
+- **Request schema:** path param `id` (uuid, the `PushToken.id` returned by API-006).
+- **Response schema:** `204 No Content`.
+- **Auth:** Bearer required; the token must belong to the caller (`403` otherwise — never let a user
+  unregister another user's device).
+- **Errors:** `403` token belongs to a different user; `404` no such token; `401`.
+
+### API-015 — DELETE /users/me — Delete account
+- **Serves:** UJ-006 (profile), the "life of the account; deleted on account-deletion request"
+  retention promise every PII field in `data-model.md`/`security-compliance.md` already makes
+- **Description:** Deletes the caller's account and everything scoped to the account alone: all
+  `Session` rows (immediate logout, everywhere), the `UserLocation` row, and all `PushToken` rows.
+  **Listings the user submitted are retained, not deleted** — `Listing.submitted_by` is set to
+  `null` (the same nullable field scraped listings already use, `data-model.md`), so existing
+  listings other users may be relying on (an open adoption listing, an active missing-cat alert)
+  don't silently vanish out from under the feed; only the account's own identity is removed. This
+  mirrors real-world moderation practice and needs no new schema.
+- **Request schema:** none (identity from bearer token).
+- **Response schema:** `204 No Content`.
+- **Auth:** Bearer required.
+- **Errors:** `401`.
 
 ### API-011 — POST /uploads/photo-url — Request a photo upload URL
 - **Serves:** F-002, F-006 (BR-001's required `photo_url` field on both API-003 and API-010)

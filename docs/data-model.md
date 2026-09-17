@@ -100,7 +100,7 @@ can fetch "every cat reported together" without inferring it from timestamps.
 | kind | enum(adoption, lost, found) | no | — | Matches Report-a-cat form's Status field (BR-001) |
 | status | enum(available, on_hold, adopted, found, missing, resolved) | no | `available` (adoption) / `missing` (lost) / `found` (found) at creation | BR-003 enum; transitions enforce INV-002 |
 | source | enum(scraped, manual) | no | — | Distinguishes the two write paths (F-001 vs. F-002) |
-| submitted_by | uuid (FK → User.id) | yes | null | Null only when `source = scraped` and no matching user account exists |
+| submitted_by | uuid (FK → User.id) | yes | null | Null when `source = scraped` and no matching user account exists, **or** after the submitting user deletes their account (API-015/BR-012 — `ON DELETE SET NULL`, never cascading a delete onto the listing itself) |
 | description | text | no | — | BR-001 required field |
 | photo_url | text | no | — | BR-001 required field; storage location `[assumption]`, object store not named in seed |
 | location_lat | double | no | — | BR-001 required field |
