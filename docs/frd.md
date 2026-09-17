@@ -85,7 +85,7 @@ as scraped listings (no separate dedup step — the submitter is the original so
 | Name | Type | Source | Validation |
 |---|---|---|---|
 | Status | enum: `Found` / `Lost` / `Adoptable` (form-facing subset) | Report-a-cat form | Required. **FRD-F002-01** — form value maps to the BR-003 stored enum: `Adoptable → available`, `Found → found`, `Lost → missing`. No other form-facing initial value is offered; `on_hold`/`adopted`/`resolved` are unreachable at creation, only via F-003 transitions. |
-| Photo | image file | device camera/gallery attach | Required, non-empty. **[assumption]** accepted formats/max size (e.g. JPEG/PNG/HEIC, ≤10MB) not specified in the seed — confirm at scaffold. |
+| Photo | image file, submitted as a `photo_url` from a prior API-011 call | device camera/gallery attach → uploaded to object storage via API-011's presigned URL first | Required, non-empty. RESOLVED 2026-09-18 (BR-013, added post-launch of this doc): the submitted `photo_url` MUST match an unconsumed `PhotoUpload` row owned by the same user, and the object must actually exist in storage — see F-002's own Error handling row below and `technical-design.md`'s `validatePhotoUpload()`. Formats: `image/jpeg`, `image/png`, `image/heic` (API-011's `content_type` enum); max size **[assumption]** ≤10MB, enforced by the presigned-URL policy at the object-store layer, not re-checked here. |
 | Location | map pin (lat/long) or free-text address | form | At least one required. A pin must fall within the NCR + Bulacan/Cavite/Laguna/Rizal bounding region **[assumption — exact bounding box not specified]**; a free-text address is geocoded server-side before write (required input to F-004's radius query) — geocoding failure blocks submit. |
 | Description | free text | form | Required, non-empty (≥1 character). No maximum specified in the seed — **[assumption]** none enforced at MVP. |
 | Facebook profile | URL / attach-flow result | `[Attach Facebook profile]` action | Required. Must match a `facebook.com` profile/page URL pattern **and** resolve to a visible, working profile/page at submit time (mirrors BR-008's resolvability semantics for the manual path — see F-005). |
@@ -99,9 +99,16 @@ as scraped listings (no separate dedup step — the submitter is the original so
 **Business rules**
 - **BR-001** — status, photo, location, description all required before Submit is enabled.
 - **BR-002** — Submit stays disabled until a Facebook profile is attached.
+- **BR-013** — `photo_url` must correspond to an upload the same user requested (API-011) and that
+  has not already been used on a different listing (added 2026-09-18 — closes a gap where
+  `photo_url` was originally trusted as opaque client text).
 - **FRD-F002-01** — status label→stored-value mapping (above).
 - **FRD-F002-02** — Submit enable condition is a strict AND of all five BR-001/BR-002 fields; any
-  one missing/invalid keeps Submit disabled — no partial-credit enabling.
+  one missing/invalid keeps Submit disabled — no partial-credit enabling. BR-013's photo-ownership
+  check is a **server-side-only** gate, not part of this client-side enable condition — the client
+  can't know a `photo_url` is "already used" without a round trip, so Submit may appear enabled and
+  still be rejected server-side in that specific case (same class of stale-client mismatch already
+  covered by the Error handling row below).
 
 **State transitions**
 Creation only. A new manual listing enters exactly one of `{available, missing, found}` per
@@ -126,6 +133,7 @@ FRD-F002-01's mapping. All further transitions are governed by F-003.
 | Server-side re-validation fails despite client showing Submit enabled (stale client) | 4xx, field-specific | Message keyed to the failing rule, e.g. BR-002 → "Attach a Facebook profile to submit." |
 | Free-text address fails geocoding | Block submit | "We couldn't locate that address — try dropping a pin instead." |
 | FB profile URL unresolvable | Block submit | "This Facebook profile/page link isn't accessible — attach a working link." |
+| `photo_url` unrecognized, not owned by caller, or already used (BR-013) | Block submit, `400` | "That photo couldn't be attached — try taking or picking it again." |
 
 ---
 

@@ -20,7 +20,8 @@
   - **Backend API** — the single contract boundary; deployed as one service. Rollback = redeploy the
     prior image/build; system-design does not specify a blue/green or canary strategy, so this is
     **[assumption]** — a straightforward redeploy-on-failure is proposed until traffic volume
-    justifies more.
+    justifies more. Liveness/readiness check: `GET /health` (API-016, added 2026-09-18) — whatever
+    deployment tooling is chosen at scaffold should poll this rather than a bespoke check.
   - **Scraper / Ingestion worker** and **Status/staleness engine** and **Location-alerting worker** —
     three scheduled/triggered workers per system-design's component split; deployed as separate
     processes from the Backend API so a scraper outage cannot take down listing reads/writes (the
@@ -46,15 +47,19 @@ by name only:
 
 | Secret | Used by | Notes |
 |---|---|---|
-| Database credentials | Backend API, all three workers (shared relational store per system-design) | Referenced via secret store; never inlined in a doc or the repo |
+| Database credentials | Backend API, all workers (shared relational store per system-design) | Referenced via secret store; never inlined in a doc or the repo |
 | Push provider credentials (APNs/FCM) | Location-alerting worker | Vendor itself is `[assumption]` — unconfirmed upstream |
-| Session/auth-signing secret | Backend API | Depends on the still-undecided auth mechanism (`[assumption]`, security-compliance) — key rotation required once chosen |
+| Facebook App Secret | Auth Service (mandatory `debug_token` app-id check, `ADR-0001`/T-010) | RESOLVED 2026-09-18 — replaces the prior "undecided auth mechanism" row; **no session-signing secret exists at all**, since Whiskr's own bearer tokens are opaque random values hashed into `Session.token_hash`, not signed JWTs (`data-model.md`) |
+| SMS/OTP provider credentials | Verification Service (F-102 phone path, API-017) | **[assumption]**, vendor unconfirmed — new dependency added 2026-09-18 |
+| Object-store credentials | Photo Upload Service (API-011's presigned-URL issuance) | **[assumption]**, vendor unconfirmed |
 | Service credential, scraper → Backend API | Scraper/Ingestion worker | Currently **undesigned** per security-compliance (T-009 context) — the scraper must not write through a bypass or a User session; this credential does not exist yet and is flagged, not invented here |
 
 - No secret value is ever written into this document, matching `security-compliance.md`'s own rule.
 - Rotation cadence for any of the above is **[assumption]** — no policy is stated upstream; propose
-  rotating the scraper service credential and the auth-signing secret on any suspected compromise at
-  minimum, pending a real policy.
+  rotating the scraper service credential and the Facebook App Secret on any suspected compromise at
+  minimum, pending a real policy. Whiskr's own session tokens need no rotation policy of their own —
+  compromise is handled per-session via logout/revocation (API-012) or per-account via account
+  deletion (API-015), not a global key rotation.
 
 ## Observability
 
@@ -74,6 +79,15 @@ and data flow — not invented metrics:
 - **Status/staleness engine** — sweep run success/failure and count of listings flagged stale per
   run (a sudden spike or drop signals a scheduling or query bug, not a real change in cat-adoption
   volume).
+- **Verification Service** (added 2026-09-18, F-102) — the daily track-record sweep's run
+  success/failure and count of accounts newly verified per run (same "spike/drop signals a bug, not
+  reality" reasoning as the staleness sweep above); phone-OTP send success/failure rate against the
+  SMS provider, and OTP-confirm success/wrong-code/expired counts (a spike in wrong-code attempts
+  against one phone number is exactly `security-compliance.md` T-014's brute-force signal).
+- **Auth Service** — login/signup success rate specifically split out from general Backend API error
+  rate, since a failure here has a different root cause (Facebook Graph API reachability, not this
+  system's own database) and needs its own signal to avoid mis-diagnosing a Facebook-side outage as
+  a Whiskr bug.
 - **Location-alerting worker** — fanout size per triggered alert (radius query result count) and
   `AlertDelivery.delivered_at` success rate against the push provider — this is the same audit trail
   security-compliance already names for F-004's "alert was sent" acceptance criterion, reused here
@@ -81,9 +95,9 @@ and data flow — not invented metrics:
 - **Mobile Client** — crash rate and push-permission/location-permission denial rate, since
   system-design notes the client must degrade gracefully (no crash) on location denial.
 - Logging must exclude `PushToken.token`, `User.fb_user_id`, `Session.token_hash`, the client-supplied
-  `fb_access_token` at login, and precise `UserLocation.lat/lng` from general application logs, per
-  `security-compliance.md`'s "Audit & logging" section — reused verbatim as a logging constraint, not
-  re-derived.
+  `fb_access_token` at login, `User.phone_number`, the raw OTP code (`PhoneVerification`), and
+  precise `UserLocation.lat/lng` from general application logs, per `security-compliance.md`'s
+  "Audit & logging" section — reused verbatim as a logging constraint, not re-derived.
 - **Monitoring/alerting tooling itself (vendor, dashboard product) is not named in any upstream doc
   — [assumption].** No specific APM or log-aggregation vendor is chosen here; this is an operational
   tooling decision, not a product requirement, and is left open pending team preference/budget at
@@ -98,6 +112,9 @@ and data flow — not invented metrics:
 | Backend API error rate on submission/status-transition endpoints | Sustained error rate over a to-be-set baseline — **[assumption]**, no baseline exists yet (no traffic history) | On-call | These endpoints are the INV-001/INV-002 enforcement points |
 | Push delivery failure rate (`AlertDelivery`) | Sustained failure over a to-be-set baseline — **[assumption]** | On-call, non-urgent | Per system-design, delivery failure must never block listing creation — this is a degraded-experience alert, not an outage alert |
 | Status/staleness sweep — missed run | Sweep does not complete within its scheduled window | On-call | Silent failure here quietly breaks BR-005 feed-visibility exclusion |
+| Facebook Graph API errors on login (API-007) | Sustained error rate over a to-be-set baseline — **[assumption]** | On-call | Blocks all login/signup, not just scraping — a Facebook-side outage now has two independent blast radii (scrape + login), named separately per `system-design.md`'s Integration points |
+| SMS/OTP provider failure rate (API-017) | Sustained failure over a to-be-set baseline — **[assumption]** | On-call, non-urgent | F-102's phone path is one of three verification routes — failure here degrades one path, never blocks login/signup/submission |
+| Verification sweep — missed run | Sweep does not complete within its scheduled window | On-call, non-urgent | Delays track-record verification only; no correctness impact, just a late badge |
 
 - **Escalation path.** Reused from `security-compliance.md`'s "Incident response basics": `team_size:
   1` means there is no on-call chain to design; the product owner is the de facto single point of
@@ -158,6 +175,8 @@ means operationally when it happens.
 | Push notifications not arriving | Check `AlertDelivery` delivery-failure rate; confirm push-provider credential validity | Per system-design, delivery failure must never block listing creation — this is a degraded-experience fix, not an outage fix; retry/backoff against the provider |
 | Status/staleness sweep silently stops flagging stale listings | Missed-run alert above; check scheduler health | Re-run the sweep manually once the scheduler is fixed; BR-005 exclusion is visibility-only, so no data is lost during the gap |
 | Mobile client crashes spike after a release | Crash-rate signal above | Staged-rollout halt / rollback to prior build via the app store — exact staged-rollout mechanism is **[assumption]**, not specified upstream |
+| Login/signup failing for all users | Facebook Graph API error-rate signal above; confirm via Facebook's own status page before assuming a Whiskr-side bug | Nothing to "fix" on Whiskr's side during a genuine Graph API outage — wait it out; verify the Facebook App Secret/App ID config first in case it's a Whiskr-side credential issue, not a Facebook outage |
+| Phone verification (F-102) failing for all users | SMS/OTP provider failure-rate signal above | Does not block login/submission/browsing — the other two F-102 paths (Facebook signals, track record) are unaffected; check provider credential validity and provider status page |
 
 ## Backup & recovery
 
