@@ -32,6 +32,7 @@ Branding changes; technical identifiers must not. Record every name and, critica
 | Whiskr | public product name | idea.md, seed docs, this ledger | Use everywhere a user/judge sees. |
 | _(none recorded)_ | internal codename | — | No codename has been established in the seed. Do not invent one. |
 | _(none recorded)_ | IMMUTABLE technical id | — | No infra/config identifiers (DB name, project id, bucket, etc.) exist yet — this ledger has no `dependsOn` on system-design. Record the first one here the moment system-design mints it, and mark it immutable at that point. |
+| F-102's original scope | historical record (ID stays immutable, scope was redefined) | `idea.md` §7 Final list (note only, full text removed 2026-09-18 to avoid a false duplicate-ID gap in `check-seed.py`) | Original text: "Verified rescuer/page badge program (manual vetting)." Promoted to MVP and redefined 2026-09-18 to an automated, criteria-based badge (see §3 pivot below) — the ID `F-102` itself was never renamed or reused, only its scope changed, consistent with this table's own rule. |
 
 > A rebrand (public name change) is a **pivot** (§3, type = `rebrand`): log it, then let the
 > reconciler propagate the new public name everywhere **except** the IMMUTABLE rows above.
@@ -50,6 +51,51 @@ architecture, tests, or task state; those stay in their canonical docs.
 | | | Activation/retention success metrics (idea.md §8) — both marked `[assumption]` |
 
 ## 3. Pivots & decisions (newest first, append at top)
+
+### 2026-09-18 — F-102 promoted from Final to MVP and redefined: automated verification badge
+- **Type:** `zoom-in` (a Final-scope idea narrowed and pulled into MVP) plus a scope redefinition
+- **Change:** F-102 "Verified rescuer/page badge program (manual vetting)" (Final, post-MVP) →
+  "Automated account verification badge" (MVP), granted when an account meets **any one** of three
+  automated criteria: (1) Facebook profile signals checked once at signup (has a real, non-default
+  profile photo and a name with more than one word — the only account-level signals Facebook's
+  Graph API exposes without extended App Review; "account age" is explicitly **not** obtainable via
+  the Graph API at any permission level, so it is not used, unlike a first instinct might assume);
+  (2) an in-app track record (≥30 days account tenure AND ≥3 submitted listings); (3) a confirmed
+  phone number via OTP. Effect: **display-only** — a badge shown on the user's listings/profile; it
+  does **not** gate submission ability or change rate limits (product-owner's explicit choice,
+  asked directly rather than assumed).
+- **Why:** direct product-owner request (this session) to strengthen reporter trust beyond the
+  per-listing Facebook anchor (F-005) — but scoped to what a solo, `team_size: 1` build can actually
+  automate, not the original manual-vetting design, which needs an admin/reviewer this build has
+  none of.
+- **Alternatives rejected:** manual admin review (the original F-102 scope) — rejected because it
+  needs a human reviewer/queue that doesn't exist at `team_size: 1`, and the product owner did not
+  select it when asked directly; a government-ID document-verification step — rejected because it
+  either needs manual review (same problem) or a paid third-party ID-verification vendor, a cost/
+  scope commitment disproportionate to an MVP; making verification a gate on submission ability —
+  rejected, product owner explicitly chose display-only.
+- **Invalidated:** none — this is an upgrade/redefinition of an already-`[assumption]`-free Final
+  feature, not a reversal of a prior MVP decision.
+- **Recorded as:** none — additive, reversible via a routine schema/logic change; does not meet the
+  ADR triple gate the way `ADR-0001` did (no forgot-password-style permanent behavioral loss here).
+
+### 2026-09-18 — Photo-upload ownership/existence validation gap found and closed (BR-013)
+- **Type:** decision (a hole found during a docs-completeness audit, not a pivot from a prior stated
+  design — API-011 previously specified issuing an upload URL but never specified validating that
+  the client actually used it before referencing `photo_url` on a submission)
+- **Change:** (no ownership/existence check on `photo_url`) → a new `PhotoUpload` table
+  (`data-model.md`) records every issued upload URL per user; API-003/API-010 now reject a
+  `photo_url` that isn't an unconsumed `PhotoUpload` row owned by the caller, or whose object
+  doesn't actually exist in storage.
+- **Why:** without this, any client could submit an arbitrary string as `photo_url` — including a
+  URL never uploaded to, or another user's upload URL — with no validation at all. A real gap in
+  what "BR-001 requires a photo" actually enforced server-side.
+- **Alternatives rejected:** trusting `photo_url` as opaque client-supplied text (the original,
+  unaudited design) — rejected as the gap itself; validating only the URL's *shape* (matches the
+  object-store's domain) without ownership tracking — rejected as insufficient, since it would
+  still let one user submit another user's already-uploaded photo URL.
+- **Invalidated:** none — additive to API-003/API-010/API-011, no prior claim is reversed.
+- **Recorded as:** none — a straightforward correctness fix, not an architectural trade-off.
 
 Each entry: date · what changed · **pivot type** · from → to · why · **invalidated claims** (reset
 to UNVALIDATED) · superseding ADR (if any). Pivot types (from the design of record):
@@ -217,6 +263,7 @@ gets breached by accident under pressure.
 |------|---------|------------------------|---------------|
 | 2026-09-18 | INV-001 | Established during the Key phase: every post must carry a visible, linked Facebook profile (F-005) — decided as the MVP trust/verification mechanism (see §3) | kept — upheld as a hard invariant rather than softened; the heavier "verified badge" alternative was deferred to final scope (F-102) instead of weakening the MVP requirement |
 | 2026-09-18 | INV-001 | F-006 (multi-cat batch reporting) extends F-002's submission path to N cats per request | kept — each cat in a batch still gets its own `FacebookAnchor` row committed in the same all-or-nothing transaction; INV-001 is enforced per-listing, unchanged by batching |
+| 2026-09-18 | INV-002 | **Bug found and fixed** during a pre-code docs audit: `technical-design.md` Algorithm 1b's `TERMINAL_STATUSES` set omitted `found` and allowed an `actor.is_admin` exception to the terminal-state guard — both contradicted `frd.md` F-003's own transition table ("no override, including for admins"; all three of `adopted`/`found`/`resolved` are terminal) | **fixed, not kept as-was** — this was a genuine INV-002 breach in the design (never in delivered code, since no code exists yet): a `found` listing could have illegally reopened to `available`/`missing`, and an admin could have bypassed the terminal guard entirely. `TERMINAL_STATUSES` corrected to `{adopted, found, resolved}`; the guard is now unconditional (no admin exception); `ACTIVE_STATUSES` corrected to `{available, on_hold, missing}` |
 
 ## 6. Open items / risks (do not lose these)
 

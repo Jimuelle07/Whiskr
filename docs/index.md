@@ -62,8 +62,9 @@ links to the one canonical home for that content — nothing here restates anoth
 - [x] No doc restates a fact owned by another (§0 respected) — spot-checked during phase-5.1/5.2.
 - [x] Every exposed surface declares auth/authz — `security-compliance.md`.
 - [x] Validation report verdict is `PASS`.
-- [x] `check-implementation-plan.py docs/implementation-plan.md --strict` → **APPROVE** (5 phases, 16 tasks).
-- [x] `trace-ids.py docs --seed docs/seed` → **APPROVE**, no dangling refs, no unused-definition warnings (2026-09-18 re-run, post auth/upload completion pass).
+- [x] `check-implementation-plan.py docs/implementation-plan.md --strict` → **APPROVE** (6 phases, 18 tasks).
+- [x] `trace-ids.py docs --seed docs/seed` → **APPROVE**, no dangling refs, no unused-definition warnings (2026-09-18 re-run, post hole-audit + F-102 promotion pass).
+- [x] `check-seed.py docs/seed/idea.md --strict-evidence --strict` → structurally complete, 0 gaps (re-run after F-102's Final-list historical mention was moved to `decision-ledger.md` §1 to avoid a false duplicate-ID reading).
 - [x] `.claude/agents/*.md` match `crew.md` — pending materialization (see below).
 - [x] **Build approval recorded** — `Jimuelle07 · Solo Developer · 2026-09-18`. Phase-5.4 (code) may begin.
 - [!] Known, deliberately-not-yet-resolved gaps: no `docs/seed/brand.md` (visual identity) or `docs/seed/market.md` (real market research) sibling exists; `API-005`/`API-006` have no dedicated `TC-###` (both cite `TC-004`); `UserLocation.radius_km` vs `Alert.radius_km` duplication in the data model (inert at MVP — radius isn't configurable yet, per `BR-006`); Facebook Graph API `debug_token` app-id verification (`security-compliance.md` T-010) not yet confirmed as implemented.

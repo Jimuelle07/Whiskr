@@ -37,7 +37,7 @@ the named task lands it, per Build-First.
 
 ## Scope
 ### In scope
-- All six MVP features (F-001..F-006) and all three invariants (INV-001..INV-003).
+- All seven MVP features (F-001..F-006, F-102) and all three invariants (INV-001..INV-003).
 - UJ-001 as the core e2e smoke (the flow `usability.md` cleared and A-001 depends on).
 - Facebook OAuth login/signup (API-007, `ADR-0001`) as concrete, testable infra now that the auth
   mechanism is resolved — no longer an `[assumption]` with nothing to test.
@@ -69,6 +69,7 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
 | F-004 | Location-based missing-cat alert | TC-004 | integration | planned | not yet |
 | F-005 | Facebook profile identity anchor | TC-005 | unit | planned | not yet |
 | F-006 | Multi-cat batch report | TC-006 | integration | planned | not yet |
+| F-102 | Automated account verification badge | TC-019, TC-020, TC-021 | integration | planned | not yet |
 | F-101 | Photo-based lost/found matching | TC-101 | e2e | deferred — post-MVP, not scaffolded | N/A |
 | F-102 | Verified rescuer/page badge program | TC-102 | integration | deferred — post-MVP, not scaffolded | N/A |
 | F-103 | In-app messaging | TC-103 | e2e | deferred — post-MVP, not scaffolded | N/A |
@@ -92,6 +93,17 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
 | TC-010 | integration + Jest + supertest | `backend/src/auth/__tests__/logout.integration.test.ts` | `npm --prefix backend test -- auth/logout.integration -t "T-012"` | task | stdout / Jest report |
 | TC-011 | integration + Jest + supertest | `backend/src/auth/__tests__/delete-account.integration.test.ts` | `npm --prefix backend test -- auth/delete-account.integration` | task | stdout / Jest report |
 | TC-012 | integration + Jest + supertest | `backend/src/users/__tests__/location-opt-out.integration.test.ts` | `npm --prefix backend test -- users/location-opt-out.integration` | task | stdout / Jest report |
+| TC-013 | integration + Jest + supertest | `backend/src/submissions/__tests__/photo-validation.integration.test.ts` | `npm --prefix backend test -- submissions/photo-validation.integration -t "BR-013"` | task | stdout / Jest report |
+| TC-014 | integration + Jest + supertest | `backend/src/auth/__tests__/signup-race.integration.test.ts` | `npm --prefix backend test -- auth/signup-race.integration` | task | stdout / Jest report |
+| TC-015 | integration + Jest + supertest | `backend/src/listings/__tests__/feed-pagination.integration.test.ts` | `npm --prefix backend test -- listings/feed-pagination.integration` | task | stdout / Jest report |
+| TC-016 | integration + Jest + supertest | `backend/src/listings/__tests__/feed-search.integration.test.ts` | `npm --prefix backend test -- listings/feed-search.integration` | task | stdout / Jest report |
+| TC-017 | integration + Jest + supertest | `backend/src/health/__tests__/health.integration.test.ts` | `npm --prefix backend test -- health.integration` | task | stdout / Jest report |
+| TC-018 | integration + Jest + supertest | `backend/src/middleware/__tests__/rate-limit.integration.test.ts` | `npm --prefix backend test -- middleware/rate-limit.integration` | task | stdout / Jest report |
+| TC-019 | integration + Jest + supertest | `backend/src/auth/__tests__/fb-signal-verification.integration.test.ts` | `npm --prefix backend test -- auth/fb-signal-verification.integration` | task | stdout / Jest report |
+| TC-020 | unit + Jest | `backend/src/verification/__tests__/track-record-sweep.test.ts` | `npm --prefix backend test -- verification/track-record-sweep` | task | stdout / Jest report |
+| TC-021 | integration + Jest + supertest | `backend/src/verification/__tests__/phone-otp.integration.test.ts` | `npm --prefix backend test -- verification/phone-otp.integration` | task | stdout / Jest report |
+| TC-022 | integration + Jest + supertest | `backend/src/auth/__tests__/profile-immutable-fields.integration.test.ts` | `npm --prefix backend test -- auth/profile-immutable-fields.integration -t "BR-014"` | task | stdout / Jest report |
+| TC-023 | integration + Jest + supertest | `backend/src/verification/__tests__/phone-uniqueness.integration.test.ts` | `npm --prefix backend test -- verification/phone-uniqueness.integration -t "BR-016"` | task | stdout / Jest report |
 | TC-101 | e2e (deferred) | `mobile/e2e/photo-match.e2e.ts` (not yet created) | `npm --prefix mobile run e2e -- photo-match` | post-MVP phase | N/A — not scaffolded |
 | TC-102 | integration (deferred) | `backend/src/badges/__tests__/verify.integration.test.ts` (not yet created) | `npm --prefix backend test -- badges/verify.integration` | post-MVP phase | N/A — not scaffolded |
 | TC-103 | e2e (deferred) | `mobile/e2e/messaging.e2e.ts` (not yet created) | `npm --prefix mobile run e2e -- messaging` | post-MVP phase | N/A — not scaffolded |
@@ -266,6 +278,103 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
 - **Automation:** `backend/src/users/__tests__/location-opt-out.integration.test.ts` · `npm --prefix
   backend test -- users/location-opt-out.integration` · red on current codebase.
 
+### TC-013 — a submission's photo_url must be an unconsumed, caller-owned, existing upload (BR-013)
+- **Covers:** BR-013, `security-compliance.md` T-013
+- **Level:** integration
+- **Steps:** attempt API-003 with (a) a `photo_url` never issued by API-011, (b) another user's
+  valid-but-unconsumed `PhotoUpload`, (c) a `photo_url` already consumed by a prior listing, (d) a
+  valid, owned, unconsumed `photo_url` whose object doesn't exist in the (stubbed) object store.
+- **Expected:** all four are rejected `400` with `field: "photo_url"`; only a valid,
+  caller-owned, unconsumed, actually-existing upload succeeds and its `PhotoUpload.consumed_at` is
+  set.
+- **Automation:** as listed above; red on current codebase.
+
+### TC-014 — concurrent first-time Facebook logins resolve to exactly one account
+- **Covers:** Algorithm 4's race-condition handling (`technical-design.md`)
+- **Level:** integration
+- **Steps:** fire two concurrent `POST /auth/facebook` calls with the same fixture `fb_user_id`,
+  neither of which has an existing `User` row yet.
+- **Expected:** exactly one `User` row exists afterward; both calls return a valid session (one
+  `201`, one `200` — order not guaranteed, but never two `User` rows and never a `500`).
+- **Automation:** as listed above; red on current codebase.
+
+### TC-015 — feed pagination is keyset-based, no skipped/duplicate rows across pages
+- **Covers:** API-001 pagination
+- **Level:** integration
+- **Steps:** seed 25 fixture listings; fetch with `limit: 10` three times, following `next_cursor`
+  each time.
+- **Expected:** 10 + 10 + 5 items, no id repeated across pages, no id skipped, `next_cursor: null`
+  on the last page.
+- **Automation:** as listed above; red on current codebase.
+
+### TC-016 — feed search matches description/location_label, case-insensitively
+- **Covers:** API-001 `q` semantics
+- **Level:** integration
+- **Steps:** seed listings with distinct `description`/`location_label` text; query `q` with a
+  substring in mixed case.
+- **Expected:** only matching listings return; combined with `kind`/`status` filters via `AND`, not
+  `OR`.
+- **Automation:** as listed above; red on current codebase.
+
+### TC-017 — health endpoint reports ok
+- **Covers:** API-016
+- **Level:** integration
+- **Steps:** GET `/health` with the data store reachable, then again with it stubbed unreachable.
+- **Expected:** `200 { status: "ok" }` in the first case; `503` with the standard error envelope in
+  the second.
+- **Automation:** as listed above; red on current codebase.
+
+### TC-018 — submission rate limit rejects the (N+1)th request in the window
+- **Covers:** `api-spec.md` Rate limits (API-003's 10/hour)
+- **Level:** integration
+- **Steps:** submit 10 valid listings as the same user within the window, then attempt an 11th.
+- **Expected:** the first 10 succeed; the 11th returns `429` with `code: "RATE_LIMITED"`.
+- **Automation:** as listed above; red on current codebase.
+
+### TC-019 — Facebook-signal verification granted at signup (F-102, FRD-F102-01)
+- **Covers:** F-102
+- **Level:** integration
+- **Steps:** sign up via a fixture Facebook profile with a real (non-silhouette) photo and a
+  two-word name; separately, sign up via a fixture with a silhouette photo.
+- **Expected:** the first account has `fb_signals_verified_at` set (and `is_verified: true`) on the
+  very first `GET /users/me`; the second does not.
+- **Automation:** as listed above; red on current codebase.
+
+### TC-020 — track-record verification sweep grants the badge once thresholds are met
+- **Covers:** F-102
+- **Level:** unit
+- **Steps:** fixture users at (a) 29 days tenure + 3 listings, (b) 31 days tenure + 2 listings, (c)
+  31 days tenure + 3 listings; run `sweepAccountVerification()`.
+- **Expected:** only (c) gets `track_record_verified_at` set; (a) and (b) do not.
+- **Automation:** as listed above; red on current codebase.
+
+### TC-021 — phone OTP verification flow (F-102, FRD-F102-02)
+- **Covers:** F-102
+- **Level:** integration
+- **Steps:** `POST /users/me/phone/start-verification`; confirm with (a) the wrong code, (b) the
+  right code after `expires_at`, (c) the right code within the window.
+- **Expected:** (a) `400`, `attempt_count` incremented; (b) `400`, expired; (c) `200`,
+  `phone_verified_at` set, `is_verified: true`, `verified_via` includes `phone`.
+- **Automation:** as listed above; red on current codebase.
+
+### TC-022 — verification and admin fields are never settable via API-009 (BR-010, BR-014)
+- **Covers:** BR-010, BR-014
+- **Level:** integration
+- **Steps:** `PATCH /users/me` with `{ display_name: "New Name", is_admin: true, is_verified: true,
+  fb_signals_verified_at: <now> }`.
+- **Expected:** `400` — the whole request is rejected (not partially applied); `display_name` is
+  unchanged; none of the protected fields is set.
+- **Automation:** as listed above; red on current codebase.
+
+### TC-023 — a confirmed phone number cannot back two accounts (BR-016)
+- **Covers:** BR-016
+- **Level:** integration
+- **Steps:** confirm phone number X on account A; attempt to start and confirm the same number X
+  on account B.
+- **Expected:** account B's confirm attempt returns `409`; account A's `phone_verified_at` is
+  unaffected.
+- **Automation:** as listed above; red on current codebase.
+
 ### TC-101 — photo-based match suggestion (deferred, post-MVP)
 - **Covers:** F-101
 - **Level:** e2e (planned)
@@ -312,12 +421,20 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
 - **Covers:** INV-002
 - **Assertion (EARS unwanted):** the system SHALL NEVER display a listing as `available` or
   `missing` WHILE its `resolved_at`/`StatusHistory` shows a prior explicit resolution by its
-  submitter or an admin.
-- **Probe:** resolve a fixture listing, then attempt every read path the feed exposes (default
-  feed, filtered-by-status query, direct-by-id fetch) and check each for the forbidden
-  `available`/`missing` display.
-- **Expected:** the forbidden status label is absent from every read path once resolved; fails the
-  test if any path still returns `available` or `missing` for that listing id.
+  submitter or an admin; and SHALL NEVER permit a transition out of any terminal status
+  (`adopted`/`found`/`resolved`) back to `available`/`missing`, **for any actor including an
+  admin** (`decision-ledger.md`'s 2026-09-18 INV-002 audit line — this exact scenario was a design
+  bug found and fixed before any code existed).
+- **Probe:** (a) resolve a fixture listing to each of `adopted`, `found`, and `resolved` in turn,
+  then attempt every read path the feed exposes (default feed, filtered-by-status query,
+  direct-by-id fetch) and check each for the forbidden `available`/`missing` display; (b) as an
+  **admin** actor (not just a non-admin), attempt to transition a `found` listing back to
+  `available` and a `resolved` listing back to `missing` — both must be rejected identically to a
+  non-admin attempt (this is the specific case `TERMINAL_STATUSES`'s missing `found` entry and the
+  admin-exception bug would have let through).
+- **Expected:** the forbidden status label is absent from every read path once resolved, for all
+  three terminal statuses; every admin reopen attempt in probe (b) is rejected with the same
+  `409 Conflict` a non-admin gets — no actor, including an admin, can reverse a terminal status.
 - **Automation:** `backend/src/status/__tests__/resolution-guard.test.ts` · `npm --prefix backend
   test -- status/resolution-guard -t "INV-002"`.
 
@@ -358,7 +475,7 @@ One EARS criterion per F-### is stated in `docs/prd.md` "Acceptance criteria" se
 - **Before demo:** full gate + UJ-001 core smoke, green, on the commit being demoed.
 
 ## Exit criteria
-- Every MVP `F-###` (F-001..F-006) has its `TC-###` passing on the default branch.
+- Every MVP `F-###` (F-001..F-006, F-102) has its `TC-###` passing on the default branch.
 - Every `INV-###` (INV-001..INV-003) has its `TC-N##` passing on the default branch.
 - UJ-001 core smoke e2e green on the commit being demoed.
 - No invented pass-rate target beyond "all listed cases green" — no defect-count/severity budget is

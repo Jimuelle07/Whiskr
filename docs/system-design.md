@@ -116,6 +116,7 @@ trade-off recorded below.
 | Relational store with geo-query support (e.g., PostgreSQL + PostGIS) — **[assumption]**, not specified in seed | Needs both relational integrity (status history, FK to users/scrape sources) and radius queries (F-004/BR-006) | Requires a geo-capable extension/index, an added ops dependency | A separate geo-search service (e.g., dedicated spatial DB) alongside a relational store — rejected at MVP scale: two data stores is unjustified operational overhead for `team_size: 1` |
 | Push via native platform providers (APNs/FCM) — **[assumption]**, no vendor named in seed | Standard, lowest-friction path for mobile push at MVP | External dependency outside the product's control (delivery, rate limits) | Building a custom polling-based in-app-only alert — rejected: defeats F-004's "pushed to nearby users" requirement, which implies out-of-app delivery |
 | Facebook OAuth as the sole account login/signup mechanism (`ADR-0001`) | Reuses the same Facebook identity every user already needs for F-005's per-listing anchor; avoids building/securing a second password-based identity system for `team_size: 1` | No forgot-password path; account recovery depends entirely on the user's own Facebook account access; a user with no Facebook account cannot use Whiskr at all | Email + password (rejected: doubles the identity-system surface, needs its own reset-flow infra with no stated justification); phone OTP (rejected: SMS cost/infra, no stated justification) |
+| Automated, criteria-based account verification (F-102) instead of manual review | No reviewer/queue exists at `team_size: 1`; three automatable signals (Facebook profile, in-app track record, phone OTP) give a real trust signal without a human in the loop | Weaker than true manual vetting (e.g., the Facebook-signal check is a coarse heuristic, not identity proof); no revocation path if a verified account later turns out to be abusive | Manual admin review (original F-102 scope, rejected — no reviewer exists); paid third-party ID-verification vendor (rejected — cost/scope disproportionate to MVP) |
 
 ## Integration points
 - **Facebook (public pages/groups)** — read-only scrape target. Failure modes: page/group structure
@@ -128,6 +129,10 @@ trade-off recorded below.
   or rate-limit on the verification call blocks login/signup entirely (not just scraping) — this is
   a new availability dependency this decision introduces, named here rather than silently folded
   into the scrape-target row above.
+- **SMS/OTP provider (F-102 phone verification)** — **[assumption]**, vendor unconfirmed, same
+  treatment as the push-provider gap: external, credential-gated, and its failure must not block
+  anything else (a user who never attempts phone verification is unaffected; account verification
+  still reachable via the other two F-102 paths).
 - **Push provider (APNs/FCM)** — **[assumption]**, vendor unconfirmed. Failure modes: delivery
   failure/rate-limiting must not block listing creation (alerting is fire-and-forget relative to the
   write path; a failed delivery is retried/logged, never blocks F-002's "visible in the feed within
