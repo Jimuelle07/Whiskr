@@ -1,0 +1,29 @@
+---
+description: Scoped rules for Whiskr's Backend API layer. Loaded only when files matching globs are in context.
+globs:
+  - "backend/src/**/*.ts"
+  - "backend/src/**/*.tsx"
+alwaysApply: false
+---
+
+# API layer rules (Whiskr Backend API)
+
+- Every endpoint maps to an `API-###` in [docs/api-spec.md](../../docs/api-spec.md); add the
+  ID in a comment above the handler.
+- Validate all input at the boundary; never trust client data — the Backend API is the single
+  contract boundary (`system-design.md`), and every `BR-###` business rule is enforced here, not
+  on the mobile client, so a client version never determines whether an invariant holds.
+- Return a typed result/error envelope — never throw raw across the API boundary.
+- Every new endpoint declares its auth/authz. The auth mechanism itself is **[assumption]**,
+  unresolved in `api-spec.md`/`security-compliance.md` — do not invent one; flag it rather than
+  guessing a scheme. An unauthenticated public endpoint must carry a comment explaining why that
+  is safe.
+- Parameterize all queries against the relational store (PostgreSQL + PostGIS — **[assumption]**,
+  `system-design.md`). No string-built SQL.
+- Never let `PushToken.token` or `UserLocation.lat/lng` appear in a client-facing response body
+  (`security-compliance.md` pre-milestone checklist; harness sensor S17).
+- The scraper/ingestion worker and the manual-submission path converge on the same `Listing`
+  write path — do not fork a second write path for scraped data; that duplicates INV-001/INV-003
+  enforcement (`system-design.md` trade-off table).
+- New endpoint ⇒ new test keyed to the `F-###` it serves (see `docs/qa-test-plan.md`); note that
+  no npm project exists yet until `TASK-001` lands (`docs/implementation-plan.md`).

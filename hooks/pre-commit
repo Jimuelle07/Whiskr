@@ -1,0 +1,92 @@
+#!/bin/sh
+# Vault commit-time guard — IDE-AGNOSTIC, portable POSIX sh, no dependencies beyond python3
+# for the optional plan/packet checks. Lives at the git layer so it behaves identically under
+# Claude Code, Cursor, Gemini CLI, Codex, Kiro, CI, or a bare terminal. The *discipline* lives
+# in AGENTS.md; this is the mechanical backstop for what is checkable.
+#
+# Enforces (flags; never freezes the spec):
+#   1. ADR ⇒ ledger line: a docs/adr/ change without a DECISION-LEDGER change is BLOCKED.
+#   2. Plan integrity: if docs/implementation-plan.md is staged, the deterministic checker must
+#      APPROVE (BLOCKED on REJECT). Skipped with a warning if python3 or the Vault is absent.
+#   3. Packet integrity: any staged docs/handoff/*.md must pass check-handoff.py (BLOCKED).
+#   4. Test-edit warning: a staged test file alongside a staged src change — REMINDER only. The
+#      executor may never edit a test (R3); a human/planner may, and must say so in the PR.
+#   5. Invariant-audit reminder when a hard-rule surface is touched — REMINDER only.
+# Genuine exception: git commit --no-verify
+# Install: see hooks/README.md
+
+LEDGER="docs/DECISION-LEDGER.md"
+PLAN="docs/implementation-plan.md"
+QA="docs/qa-test-plan.md"
+VAULT_DIR="${VAULT_DIR:-box/vault}"
+staged=$(git diff --cached --name-only)
+
+hr() { echo "──────────────────────────────────────────────────────────────"; }
+
+# --- 1. ADR ⇒ ledger line (blocking) -------------------------------------------
+adr_changed=$(printf '%s\n' "$staged" | grep -E '^docs/adr/' || true)
+ledger_changed=$(printf '%s\n' "$staged" | grep -F "$LEDGER" || true)
+if [ -n "$adr_changed" ] && [ -f "$LEDGER" ] && [ -z "$ledger_changed" ]; then
+  hr; echo "BLOCKED: an ADR changed but $LEDGER did not."
+  echo "Add the §3 line in the SAME commit (ADR ⇒ ledger). Exception: git commit --no-verify"; hr
+  exit 1
+fi
+
+# --- 2./3. Plan + packet checkers (blocking when runnable) ----------------------
+py=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1; then py="$candidate"; break; fi
+done
+plan_staged=$(printf '%s\n' "$staged" | grep -Fx "$PLAN" || true)
+packets_staged=$(printf '%s\n' "$staged" | grep -E '^docs/handoff/TASK-[0-9]{3}\.md$' || true)
+
+if [ -n "$plan_staged" ] || [ -n "$packets_staged" ]; then
+  if [ -z "$py" ] || [ ! -f "$VAULT_DIR/tools/check-implementation-plan.py" ]; then
+    hr; echo "WARNING: plan/packet staged but python3 or $VAULT_DIR/tools not found; checks skipped."
+    echo "Run them before review. Set VAULT_DIR if the kit lives elsewhere."; hr
+  else
+    if [ -n "$plan_staged" ]; then
+      if ! "$py" "$VAULT_DIR/tools/check-implementation-plan.py" "$PLAN"; then
+        hr; echo "BLOCKED: $PLAN failed the deterministic checker (see REJECT lines above)."; hr
+        exit 1
+      fi
+    fi
+    for packet in $packets_staged; do
+      args=""
+      [ -f "$PLAN" ] && args="$args --plan $PLAN"
+      [ -f "$QA" ] && args="$args --qa $QA"
+      # shellcheck disable=SC2086
+      if ! "$py" "$VAULT_DIR/tools/check-handoff.py" "$packet" $args; then
+        hr; echo "BLOCKED: $packet failed check-handoff.py; do not dispatch an executor on it."; hr
+        exit 1
+      fi
+    done
+  fi
+fi
+
+# --- 4. Test-edit reminder (non-blocking) --------------------------------------
+tests_changed=$(printf '%s\n' "$staged" | grep -Ei '(^|/)(tests?|__tests__|spec|e2e)(/|$)|\.(test|spec)\.[a-z]+$|_test\.[a-z]+$' || true)
+src_changed=$(printf '%s\n' "$staged" | grep -Ev '(^|/)(tests?|__tests__|spec|e2e)(/|$)|\.(test|spec)\.[a-z]+$|_test\.[a-z]+$|^docs/|\.md$' || true)
+if [ -n "$tests_changed" ] && [ -n "$src_changed" ]; then
+  hr; echo "BLOCKED: this commit contains BOTH test files and source files."
+  echo "Build-First keeps them apart (R3): implementation lands in one commit, the deferred tests"
+  echo "land in their own. A mixed commit is how 'edit the test until it passes' becomes free."
+  echo ""
+  echo "  tests:  $(printf '%s' "$tests_changed" | tr '
+' ' ')"
+  echo "  source: $(printf '%s' "$src_changed" | tr '
+' ' ')"
+  echo ""
+  echo "Split it:  git reset HEAD <the test files>   then commit them separately."
+  echo "Genuine exception: git commit --no-verify"; hr
+  exit 1
+fi
+
+# --- 5. Invariant-audit reminder (non-blocking) --------------------------------
+inv_surface=$(printf '%s\n' "$staged" | grep -E '(^|/)(data|content|copy)/|design-system|firestore\.rules|\.csv$' || true)
+if [ -n "$inv_surface" ] && [ -f "$LEDGER" ] && [ -z "$ledger_changed" ]; then
+  hr; echo "REMINDER (not blocking): this commit touches a hard-rule surface (data / copy / rules)."
+  echo "If it could affect an INV-###, add an audit line to §5 of $LEDGER before merge."; hr
+fi
+
+exit 0
