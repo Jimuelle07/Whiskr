@@ -32,6 +32,7 @@ Branding changes; technical identifiers must not. Record every name and, critica
 | Whiskr | public product name | idea.md, seed docs, this ledger | Use everywhere a user/judge sees. |
 | _(none recorded)_ | internal codename | — | No codename has been established in the seed. Do not invent one. |
 | _(none recorded)_ | IMMUTABLE technical id | — | No infra/config identifiers (DB name, project id, bucket, etc.) exist yet — this ledger has no `dependsOn` on system-design. Record the first one here the moment system-design mints it, and mark it immutable at that point. |
+| F-102's original scope | historical record (ID stays immutable, scope was redefined) | `idea.md` §7 Final list (note only, full text removed 2026-09-18 to avoid a false duplicate-ID gap in `check-seed.py`) | Original text: "Verified rescuer/page badge program (manual vetting)." Promoted to MVP and redefined 2026-09-18 to an automated, criteria-based badge (see §3 pivot below) — the ID `F-102` itself was never renamed or reused, only its scope changed, consistent with this table's own rule. |
 
 > A rebrand (public name change) is a **pivot** (§3, type = `rebrand`): log it, then let the
 > reconciler propagate the new public name everywhere **except** the IMMUTABLE rows above.
@@ -50,6 +51,104 @@ architecture, tests, or task state; those stay in their canonical docs.
 | | | Activation/retention success metrics (idea.md §8) — both marked `[assumption]` |
 
 ## 3. Pivots & decisions (newest first, append at top)
+
+### 2026-09-18 — Account-deletion cascade was incomplete (5 of 10 User FKs missed; found and fixed)
+- **Type:** decision (a hole found during a fifth docs-completeness audit pass, requested directly
+  by the product owner and directed at this specific area)
+- **Change:** traced every foreign key in `data-model.md` pointing at `User.id` (10 total) against
+  BR-012's original enumeration and found only 5 were actually handled
+  (`Session`/`UserLocation`/`PushToken` cascade-deleted, `Listing.submitted_by`/`ReportBatch.
+  submitted_by` nulled). The other 5 were silent gaps: `Listing.resolved_by` and `StatusHistory.
+  changed_by` (should null, same reasoning as `submitted_by` — retain the record, scrub the
+  identity) were never mentioned at all; `PhotoUpload.user_id` and `PhoneVerification.user_id`
+  (bookkeeping-only, safe to cascade-delete) were never mentioned; `AlertDelivery.user_id` is
+  **not nullable**, so it needed a cascade-delete decision, not a null, and had neither.
+- **Why:** without this, deleting an account would either violate a `NOT NULL` foreign-key
+  constraint outright (`AlertDelivery`) or silently leave orphaned rows/PII behind
+  (`PhotoUpload`/`PhoneVerification`) or leave a dangling reference an ORM might not even
+  flag until it broke in production (`resolved_by`/`changed_by`). A "delete my account" feature
+  that doesn't actually delete/scrub everything it should is a real product and compliance problem
+  (RA 10173, `security-compliance.md`'s Compliance obligations section), not a cosmetic gap.
+- **Alternatives rejected:** leaving `AlertDelivery.user_id` nullable-and-null instead of
+  cascade-delete — rejected because a recipient-only audit row (unlike a `Listing`, which other
+  users see and rely on) has no reason to persist once its sole subject's account is gone; deleting
+  `Listing`/`ReportBatch`/`StatusHistory` rows outright instead of nulling — rejected, unchanged
+  from the original BR-012 reasoning (other users and INV-002's audit guarantee depend on them).
+- **Invalidated:** none — additive corrections to BR-012/`deleteAccount()`, not a reversal.
+- **Recorded as:** none — a straightforward completeness fix, not a new trade-off; the one
+  genuinely new trade-off (nulling `StatusHistory.changed_by` weakens T-004's repudiation mitigation
+  for a deleted actor) is named inline in `security-compliance.md` T-004 and `prd.md` BR-012, not
+  hidden in this ledger alone.
+
+### 2026-09-18 — F-004's alert trigger was wired to a function it could never reach (bug found and fixed)
+- **Type:** decision (a hole found during a third docs-completeness audit pass, not a pivot — no
+  prior stated design intended this)
+- **Change:** `technical-design.md` Algorithm 1b (`transitionStatus()`) was the only place that
+  called `createAlertAndFanout()`, firing on "`old_status != 'missing' and new_status ==
+  'missing'`." But `frd.md` F-003's own transition table has **no transition that lands on
+  `missing`** — every listing that is ever `missing` got there at *creation* (`kind = lost`),
+  never via a status transition. This means the alert trigger, as originally written, could never
+  fire for a single real submission — F-004, arguably the product's single most safety-critical
+  feature (a lost cat's owner depends on it), was dead on arrival in the design. The sequence
+  diagram already documented the correct behavior ("`Backend API -> Alerting worker: enqueue (if
+  status == missing)`" right after a manual submission) and `createBatchListings()` (Algorithm 5)
+  already called it correctly per cat — only the single-cat creation path (`gateListingWrite()`,
+  Algorithm 3, shared by both the manual and scraper pipelines) was missing the call. Fixed: added
+  the trigger to `gateListingWrite()`; kept `transitionStatus()`'s copy as intentional
+  forward-compatible dead code (PRD's F-004 EARS literally says "created **or updated**").
+- **Why it was found:** a systematic trace of "which code paths actually set `status = missing`"
+  against "which code paths call `createAlertAndFanout()`" during this audit, prompted by the
+  product owner asking for more holes after two rounds had already found real bugs.
+- **Alternatives rejected:** none — this is an unambiguous omission, not a design trade-off.
+- **Invalidated:** none — `qa-test-plan.md` TC-004 already exercised the *creation* path
+  correctly ("create a `Listing` with `status: missing`; run the alert-fanout worker"), so the test
+  itself needed no change; only the algorithm it was testing was wrong.
+- **Recorded as:** none — a straightforward correctness fix caught before any code existed.
+
+### 2026-09-18 — F-102 promoted from Final to MVP and redefined: automated verification badge
+- **Type:** `zoom-in` (a Final-scope idea narrowed and pulled into MVP) plus a scope redefinition
+- **Change:** F-102 "Verified rescuer/page badge program (manual vetting)" (Final, post-MVP) →
+  "Automated account verification badge" (MVP), granted when an account meets **any one** of three
+  automated criteria: (1) Facebook profile signals checked once at signup (has a real, non-default
+  profile photo and a name with more than one word — the only account-level signals Facebook's
+  Graph API exposes without extended App Review; "account age" is explicitly **not** obtainable via
+  the Graph API at any permission level, so it is not used, unlike a first instinct might assume);
+  (2) an in-app track record (≥30 days account tenure AND ≥3 submitted listings); (3) a confirmed
+  phone number via OTP. Effect: **display-only** — a badge shown on the user's listings/profile; it
+  does **not** gate submission ability or change rate limits (product-owner's explicit choice,
+  asked directly rather than assumed).
+- **Why:** direct product-owner request (this session) to strengthen reporter trust beyond the
+  per-listing Facebook anchor (F-005) — but scoped to what a solo, `team_size: 1` build can actually
+  automate, not the original manual-vetting design, which needs an admin/reviewer this build has
+  none of.
+- **Alternatives rejected:** manual admin review (the original F-102 scope) — rejected because it
+  needs a human reviewer/queue that doesn't exist at `team_size: 1`, and the product owner did not
+  select it when asked directly; a government-ID document-verification step — rejected because it
+  either needs manual review (same problem) or a paid third-party ID-verification vendor, a cost/
+  scope commitment disproportionate to an MVP; making verification a gate on submission ability —
+  rejected, product owner explicitly chose display-only.
+- **Invalidated:** none — this is an upgrade/redefinition of an already-`[assumption]`-free Final
+  feature, not a reversal of a prior MVP decision.
+- **Recorded as:** none — additive, reversible via a routine schema/logic change; does not meet the
+  ADR triple gate the way `ADR-0001` did (no forgot-password-style permanent behavioral loss here).
+
+### 2026-09-18 — Photo-upload ownership/existence validation gap found and closed (BR-013)
+- **Type:** decision (a hole found during a docs-completeness audit, not a pivot from a prior stated
+  design — API-011 previously specified issuing an upload URL but never specified validating that
+  the client actually used it before referencing `photo_url` on a submission)
+- **Change:** (no ownership/existence check on `photo_url`) → a new `PhotoUpload` table
+  (`data-model.md`) records every issued upload URL per user; API-003/API-010 now reject a
+  `photo_url` that isn't an unconsumed `PhotoUpload` row owned by the caller, or whose object
+  doesn't actually exist in storage.
+- **Why:** without this, any client could submit an arbitrary string as `photo_url` — including a
+  URL never uploaded to, or another user's upload URL — with no validation at all. A real gap in
+  what "BR-001 requires a photo" actually enforced server-side.
+- **Alternatives rejected:** trusting `photo_url` as opaque client-supplied text (the original,
+  unaudited design) — rejected as the gap itself; validating only the URL's *shape* (matches the
+  object-store's domain) without ownership tracking — rejected as insufficient, since it would
+  still let one user submit another user's already-uploaded photo URL.
+- **Invalidated:** none — additive to API-003/API-010/API-011, no prior claim is reversed.
+- **Recorded as:** none — a straightforward correctness fix, not an architectural trade-off.
 
 Each entry: date · what changed · **pivot type** · from → to · why · **invalidated claims** (reset
 to UNVALIDATED) · superseding ADR (if any). Pivot types (from the design of record):
@@ -217,6 +316,7 @@ gets breached by accident under pressure.
 |------|---------|------------------------|---------------|
 | 2026-09-18 | INV-001 | Established during the Key phase: every post must carry a visible, linked Facebook profile (F-005) — decided as the MVP trust/verification mechanism (see §3) | kept — upheld as a hard invariant rather than softened; the heavier "verified badge" alternative was deferred to final scope (F-102) instead of weakening the MVP requirement |
 | 2026-09-18 | INV-001 | F-006 (multi-cat batch reporting) extends F-002's submission path to N cats per request | kept — each cat in a batch still gets its own `FacebookAnchor` row committed in the same all-or-nothing transaction; INV-001 is enforced per-listing, unchanged by batching |
+| 2026-09-18 | INV-002 | **Bug found and fixed** during a pre-code docs audit: `technical-design.md` Algorithm 1b's `TERMINAL_STATUSES` set omitted `found` and allowed an `actor.is_admin` exception to the terminal-state guard — both contradicted `frd.md` F-003's own transition table ("no override, including for admins"; all three of `adopted`/`found`/`resolved` are terminal) | **fixed, not kept as-was** — this was a genuine INV-002 breach in the design (never in delivered code, since no code exists yet): a `found` listing could have illegally reopened to `available`/`missing`, and an admin could have bypassed the terminal guard entirely. `TERMINAL_STATUSES` corrected to `{adopted, found, resolved}`; the guard is now unconditional (no admin exception); `ACTIVE_STATUSES` corrected to `{available, on_hold, missing}` |
 
 ## 6. Open items / risks (do not lose these)
 

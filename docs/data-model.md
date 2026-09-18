@@ -10,6 +10,8 @@
  User ──1───N── PushToken           (a user may have multiple devices)
  User ──1───N── ReportBatch         (submitted_by; F-006 multi-cat batch reports)
  User ──1───N── Session             (one row per issued bearer token; API-007/API-012)
+ User ──1───N── PhotoUpload         (one row per requested upload URL; API-011)
+ User ──1───N── PhoneVerification   (one row per OTP attempt cycle; F-102/API-017/API-018)
 
  ReportBatch ──1───N── Listing      (batch_id, nullable; F-006 grouping reference, no lifecycle of its own)
 
@@ -39,8 +41,31 @@ so status/staleness/alerting logic (F-003, F-004, INV-002) is never duplicated a
 | fb_user_id | text | no | — | Facebook-issued user id from OAuth (`ADR-0001`); unique per account; resolves the prior `[assumption]` `auth_identifier` field, which is removed |
 | location_opt_in | boolean | no | false | Gate for UJ-002/UJ-003 location features |
 | is_admin | boolean | no | false | BR-004/INV-002 gate — who may change another submitter's status; provisioning is `[assumption]`, no admin model in seed; never settable via any user-facing endpoint (BR-010) |
+| fb_signals_verified_at | timestamp | yes | null | Set once, at signup, if the Facebook profile passed the automated signal check (Algorithm 7, F-102); never re-evaluated afterward |
+| track_record_verified_at | timestamp | yes | null | Set by the daily verification sweep (Algorithm 8) once tenure + submission-volume thresholds are met; never unset once granted (BR-014) |
+| phone_number | text | yes | null | E.164-normalized; set only after a confirmed OTP (API-018); unique across accounts (BR-016) when non-null |
+| phone_verified_at | timestamp | yes | null | Set when `phone_number` is confirmed via OTP |
 | created_at | timestamp | no | now() | |
 | updated_at | timestamp | no | now() | |
+
+`User.is_verified` is **derived, not stored**: `fb_signals_verified_at IS NOT NULL OR
+track_record_verified_at IS NOT NULL OR phone_verified_at IS NOT NULL` (F-102). Keeping the three
+source timestamps instead of one flag preserves *which* signal(s) granted it — useful for the
+badge's tooltip/audit and for tuning thresholds later without losing history. None of the four
+verification fields is ever settable via any user-facing endpoint (BR-014), same protection as
+`is_admin`.
+
+### PhoneVerification
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| user_id | uuid (FK → User.id) | no | — | Row deleted (cascade) on account deletion (BR-012, added 2026-09-18 — was missed originally); purely an OTP-attempt-history bookkeeping row, no other-user dependency |
+| phone_number | text | no | — | E.164-normalized candidate number, not yet confirmed |
+| otp_hash | text | no | — | SHA-256 hash of the OTP code — same never-store-the-raw-value principle as `Session.token_hash` |
+| attempt_count | integer | no | 0 | Incremented on every wrong-code confirm attempt; locked out at 5 (F-102 rate-limit) |
+| expires_at | timestamp | no | `created_at + 10 minutes` | OTP validity window |
+| verified_at | timestamp | yes | null | Set on successful confirm; this row's `user_id`'s `User.phone_number`/`phone_verified_at` are set at the same time, same transaction |
+| created_at | timestamp | no | now() | |
 
 **No Facebook access/refresh token field exists on this table.** Per `ADR-0001`, the token the
 client presents at login is verified against the Graph API once and then discarded — Whiskr never
@@ -51,7 +76,7 @@ from also applying here.
 | Field | Type | Null? | Default | Description |
 |-------|------|-------|---------|-------------|
 | id | uuid | no | generated | Primary key |
-| user_id | uuid (FK → User.id) | no | — | Owner of this session |
+| user_id | uuid (FK → User.id) | no | — | Owner of this session; row deleted (cascade) on account deletion, BR-012 |
 | token_hash | text | no | — | SHA-256 hash of the bearer token returned to the client at API-007; the raw token itself is never stored, only its hash — same principle as password hashing, so a data-store leak alone does not yield directly reusable tokens |
 | created_at | timestamp | no | now() | |
 | expires_at | timestamp | no | `created_at + 90 days` | Fixed 90-day expiration — **[assumption]**, no session-lifetime policy exists in the seed; re-login (a fresh Facebook OAuth round trip, not a "refresh") is required after expiry, consistent with there being no forgot-password/refresh-token flow (`ADR-0001`) |
@@ -63,16 +88,37 @@ logout (API-012) needs true revocation, which a stateless JWT cannot provide wit
 denylist (an equivalent extra data-store lookup anyway, at more complexity) — see
 `decision-ledger.md`.
 
+### PhotoUpload
+| Field | Type | Null? | Default | Description |
+|-------|------|-------|---------|-------------|
+| id | uuid | no | generated | Primary key |
+| user_id | uuid (FK → User.id) | no | — | Who requested the upload URL (API-011). Row deleted (cascade) on account deletion (BR-012, added 2026-09-18 — was missed originally); safe because `Listing.photo_url` is a stored snapshot, not a live reference to this table, so deleting this bookkeeping row never affects an already-published listing's photo |
+| photo_url | text | no | — | The exact URL returned to the client; unique — this is what `Listing.photo_url` must match |
+| content_type | enum(image/jpeg, image/png, image/heic) | no | — | Echoes API-011's request |
+| created_at | timestamp | no | now() | |
+| expires_at | timestamp | no | `created_at + 15 minutes` | The presigned `upload_url`'s own expiry (API-011); after this, the client must request a new one |
+| consumed_at | timestamp | yes | null | Set the moment this `photo_url` is successfully referenced by a `Listing` (API-003/API-010); a second attempt to reuse it is rejected (BR-013) |
+
+Closes a gap the initial API-011 spec left open: without this table, any client could submit an
+arbitrary `photo_url` string on API-003/API-010 with no proof anything was ever uploaded, or reuse
+someone else's upload URL. BR-013 (`prd.md`) requires every submitted `photo_url` to (a) match a
+`PhotoUpload` row owned by the submitting user, (b) not be already `consumed_at`, and (c) the
+object itself to actually exist in storage (a `HEAD` check against the real bucket, not just
+against this table) — this table proves *ownership and issuance*, the storage `HEAD` check proves
+the client actually uploaded something.
+
 ### ReportBatch
 | Field | Type | Null? | Default | Description |
 |-------|------|-------|---------|-------------|
 | id | uuid | no | generated | Primary key |
-| submitted_by | uuid (FK → User.id) | no | — | The user who submitted the batch (F-006) |
+| submitted_by | uuid (FK → User.id) | yes | — | The user who submitted the batch (F-006); set to `null` on account deletion (BR-012), same as `Listing.submitted_by` |
 | created_at | timestamp | no | now() | |
 
 A thin grouping reference only — no `status`, no lifecycle, never mutated after creation. Each cat
 in the batch is an independent `Listing` row (see below); `ReportBatch` exists solely so the client
-can fetch "every cat reported together" without inferring it from timestamps.
+can fetch "every cat reported together" without inferring it from timestamps. On account deletion
+(BR-012), `submitted_by` is set to `null` here too, for the same reason as `Listing.submitted_by` —
+the batch grouping is retained, only the account identity is removed.
 
 ### UserLocation
 | Field | Type | Null? | Default | Description |
@@ -110,7 +156,7 @@ can fetch "every cat reported together" without inferring it from timestamps.
 | duplicate_of | uuid (FK → Listing.id) | yes | null | Self-reference; set when the dedup match (F-001) collapses a re-scraped post into an existing listing |
 | batch_id | uuid (FK → ReportBatch.id) | yes | null | Set when this listing was created as part of a multi-cat batch report (F-006); null for single-cat submissions and all scraped listings |
 | resolved_at | timestamp | yes | null | Set only on an explicit BR-004 status transition to `resolved`/`adopted`/`found` |
-| resolved_by | uuid (FK → User.id) | yes | null | Submitter or admin who resolved it (BR-004) |
+| resolved_by | uuid (FK → User.id) | yes | null | Submitter or admin who resolved it (BR-004); set to `null` on that user's account deletion (BR-012, added 2026-09-18 — was missed in the original account-deletion cascade) |
 | created_at | timestamp | no | now() | |
 | updated_at | timestamp | no | now() | |
 
@@ -149,7 +195,7 @@ can fetch "every cat reported together" without inferring it from timestamps.
 | listing_id | uuid (FK → Listing.id) | no | — | |
 | old_status | enum (same set as Listing.status) | no | — | |
 | new_status | enum (same set as Listing.status) | no | — | |
-| changed_by | uuid (FK → User.id) | yes | null | Null for system-driven staleness flags (which do not touch `status` — see `Listing.is_stale`); populated for every explicit BR-004 transition |
+| changed_by | uuid (FK → User.id) | yes | null | Null for system-driven staleness flags (which do not touch `status` — see `Listing.is_stale`); populated for every explicit BR-004 transition. Also set to `null` on that user's account deletion (BR-012, added 2026-09-18) — the transition record itself (`old_status`, `new_status`, `changed_at`) is retained for INV-002/TC-N02, only the actor's identity is removed; **named residual limitation:** a repudiation dispute (T-004) arising after the actor's account is deleted can no longer be resolved by this column, since the FK is gone — an accepted trade-off for honoring account deletion, not an oversight |
 | changed_at | timestamp | no | now() | Append-only; this table is the audit trail INV-002 verification (TC-N02) reads |
 
 ### Alert
@@ -165,7 +211,7 @@ can fetch "every cat reported together" without inferring it from timestamps.
 |-------|------|-------|---------|-------------|
 | id | uuid | no | generated | Primary key |
 | alert_id | uuid (FK → Alert.id) | no | — | |
-| user_id | uuid (FK → User.id) | no | — | Recipient within radius at trigger time |
+| user_id | uuid (FK → User.id) | no | — | Recipient within radius at trigger time. **Not nullable** (unlike `Listing.submitted_by`/`resolved_by`/`StatusHistory.changed_by`) — added 2026-09-18: on that recipient's account deletion, the row is **deleted (cascade)**, not nulled, since a recipient-only audit row has no other-user display dependency the way a `Listing` does; a minor, accepted reduction in historical fanout-count precision, not a correctness issue |
 | delivered_at | timestamp | yes | null | Null until the push provider confirms/attempts delivery |
 | opened_at | timestamp | yes | null | Set if/when the user taps the notification |
 
@@ -190,13 +236,21 @@ can fetch "every cat reported together" without inferring it from timestamps.
 - `Session.token_hash` — unique + indexed (the lookup path for every authenticated request: hash
   the incoming bearer token, look up the `Session` row, reject if missing/expired/revoked).
 - `Session(user_id)` — index for "revoke all my sessions" and account-deletion cascade reads.
+- `PhotoUpload.photo_url` — unique + indexed (the lookup path for BR-013's ownership/consumption
+  check at submission time).
+- `User.phone_number` — unique, partial index `WHERE phone_number IS NOT NULL` (BR-016: one phone
+  backs at most one verified account; unconfirmed candidates in `PhoneVerification` are not subject
+  to this constraint, only the confirmed `User.phone_number`).
+- `PhoneVerification(user_id, verified_at)` — index for "does this user have a pending/verified OTP
+  cycle" reads.
 - Foreign keys: `Listing.submitted_by → User.id`, `Listing.resolved_by → User.id`,
   `Listing.duplicate_of → Listing.id` (self-referential, nullable), `Listing.batch_id →
   ReportBatch.id` (nullable), `FacebookAnchor.listing_id → Listing.id`, `ScrapedPost.listing_id →
   Listing.id`, `ScrapedPost.scrape_source_id → ScrapeSource.id`, `StatusHistory.listing_id →
   Listing.id`, `Alert.listing_id → Listing.id`, `AlertDelivery.alert_id → Alert.id`,
   `AlertDelivery.user_id → User.id`, `UserLocation.user_id → User.id`, `PushToken.user_id →
-  User.id`, `ReportBatch.submitted_by → User.id`, `Session.user_id → User.id`.
+  User.id`, `ReportBatch.submitted_by → User.id`, `Session.user_id → User.id`,
+  `PhotoUpload.user_id → User.id`, `PhoneVerification.user_id → User.id`.
 
 ## Retention & privacy classification
 - **User.fb_user_id** — PII. Retention: life of the account; deleted on account-deletion request.
@@ -204,6 +258,16 @@ can fetch "every cat reported together" without inferring it from timestamps.
   `ADR-0001`), reducing the secret-handling surface to zero long-lived Facebook credentials.
   **[assumption]** — no data-retention policy beyond "life of account" is stated in the seed; this
   follows standard practice, to confirm with product owner/legal at scaffold.
+- **User.phone_number** — PII. Retention: life of the account or until the user removes it
+  (**[assumption]**, no dedicated "remove phone" endpoint is specified here — revisit if requested;
+  account deletion (BR-012) removes it along with everything else).
+- **PhoneVerification.otp_hash** — secret-adjacent, same class as `Session.token_hash`: a hash, not
+  the raw code; the raw OTP is only ever sent via SMS, never stored, never logged. Retention: until
+  `expires_at`, garbage-collectable afterward (**[assumption]**).
+- **PhotoUpload.photo_url** — internal (points at an object-store URL that becomes public/internal
+  once consumed, same classification as `Listing.photo_url`). Retention: unconsumed rows may be
+  garbage-collected after `expires_at` (**[assumption]**, operational default); consumed rows are
+  kept for the life of the referencing `Listing`, as the audit trail for BR-013.
 - **Session.token_hash** — secret-adjacent (same class as `PushToken.token`): a hash, not the raw
   token, but still sensitive — never logged, never returned in any read path (only the raw token is
   returned once, at creation, in API-007's response body). Retention: until `expires_at` or
@@ -244,3 +308,7 @@ can fetch "every cat reported together" without inferring it from timestamps.
   greenfield data existed to migrate, per `ADR-0001`).
 - `Session` (added 2026-09-18, resolving the session-mechanism assumption) is a new, independent
   table — additive, no change to any existing entity.
+- `PhotoUpload` (added 2026-09-18, closing the photo-ownership validation gap) is additive.
+- `User.fb_signals_verified_at`/`track_record_verified_at`/`phone_number`/`phone_verified_at` and
+  the new `PhoneVerification` table (added 2026-09-18, F-102 promoted to MVP) are additive — four
+  new nullable columns plus one new table, no change to any existing row.

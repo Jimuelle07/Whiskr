@@ -153,6 +153,22 @@ product-owner-only calls, rather than the validator or planner guessing them:
   not need to judge (they postdate this validation pass entirely: no auth/session/upload design
   existed yet at the time of this PASS) — added via `docs/technical-design.md` Algorithms 4–5,
   `data-model.md`'s new `Session` entity, and `api-spec.md` API-011/API-012.
+- **§4's `UserLocation.radius_km` vs. `Alert.radius_km` open question is now RESOLVED**, not just
+  reconciled-by-proposal as this report originally found it: `technical-design.md`'s Algorithm 2 now
+  states plainly that `UserLocation.radius_km` is the fanout query's actual parameter, fixing two
+  bugs found in the same pass (a `findOptedInUsersWithinRadius()` signature/call-site arity
+  mismatch, and a query comment referencing a `location_opt_in` column that doesn't exist on
+  `UserLocation` — it's a `User` column). A pre-code correctness audit, not a validator finding.
+- **A real F-004 bug was found and fixed post-PASS**: the alert-fanout trigger was wired only to
+  `transitionStatus()`, a function that — per `frd.md`'s own F-003 transition table, which this
+  report's §1 already confirmed matched `idea.md` without contradiction — can never actually
+  receive a transition into `missing` (every listing reaches `missing` at creation only). The
+  trigger was missing from the creation path (`gateListingWrite()`) entirely, meaning F-004 could
+  never have fired for a real submission. This was not something this validation pass's method (a
+  concept-vs-design coherence check, §1–§4 above) was designed to catch — it required tracing every
+  code path that writes `status = missing` against every code path that calls the alerting
+  function, a pseudocode-level trace this report's checklist doesn't perform. Fixed in
+  `technical-design.md`; logged in `decision-ledger.md`.
 
 None of these change §1–§4's findings about the docs that existed at validation time; they are
 additive resolutions of gaps this report already named as open, not contradictions of anything it

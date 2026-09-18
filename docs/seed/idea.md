@@ -86,10 +86,10 @@ alert urgently instead of relying on a general engagement feed**.
 - **F-004** — Location-based missing-cat alert pinned to an area, pushed to nearby users → solves the "buried within hours" urgency pain in §1
 - **F-005** — Every post requires a linked, visible Facebook profile as an identity anchor → solves the scam/trust risk raised during capture
 - **F-006** — A single report can include multiple cats found/lost together (a "batch" report), each becoming its own independently status-tracked listing → solves the common real-world case of a litter or group of cats found/lost as one event (added 2026-09-18, product-owner request; see `decision-ledger.md`)
+- **F-102** — Automated account verification badge (display-only trust signal, granted when an account meets at least one of three automated criteria — Facebook profile signals, in-app tenure/track record, or a confirmed phone number) → solves an account-level version of the capture-stage scam/trust concern. **Promoted from Final to MVP and redefined 2026-09-18** (product-owner request; original scope was manual vetting — historical record kept in `decision-ledger.md` §1, deliberately not repeated here to avoid a false duplicate-ID reading).
 
 ### Final product — full vision
 - **F-101** — Photo-based matching suggestions between "lost" and "found" reports
-- **F-102** — Verified rescuer/page badge program (manual vetting)
 - **F-103** — In-app messaging between finder/adopter and poster
 - **F-104** — Formal partnership/API feed from established rescue pages (reduces scrape dependency)
 

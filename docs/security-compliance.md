@@ -11,6 +11,9 @@
 |---|---|---|
 | `User.fb_user_id` | PII | Retention: life of account, deleted on account-deletion request; no Facebook access/refresh token is ever persisted (verify-then-discard at login, `ADR-0001`) |
 | `Session.token_hash` | Secret-adjacent | Hash only, never the raw token; raw token returned once at creation (API-007), never in any subsequent read; retained until `expires_at`/`revoked_at` |
+| `User.phone_number` | PII | Retention: life of account or account deletion (BR-012); unique across accounts (BR-016) |
+| `PhoneVerification.otp_hash` | Secret-adjacent | Hash only, same principle as `Session.token_hash`; the raw code is only ever sent via SMS, never stored or logged |
+| `PhotoUpload.photo_url` | Internal | Same classification as `Listing.photo_url`; tracks issuance/consumption only, per BR-013 |
 | `Listing.location_lat/lng`, `location_label` | PII-adjacent | Internal; visible to app users by product design (the location *is* the listing's point) — precision/fuzzing rule is **[assumption]**, not specified in seed |
 | `UserLocation.lat/lng` | PII | Used only for radius matching (F-004); **not shown to other users**; retained until opt-out/account deletion |
 | `PushToken.token` | Secret-adjacent | Device push credential; not human-readable but treated as sensitive; retained until device unregisters/token rotates |
@@ -66,15 +69,17 @@
 | T-001 | Spoofing | Submitter supplies a Facebook profile/page URL they do not own or control as the "identity anchor" | Fake trust signal; scam listings look legitimate | BR-002/BR-008 gate blocks a `Listing` write with no `FacebookAnchor` row at all; note this validates *presence/shape*, not *ownership* — deeper verification is F-102 (verified badge, final-product, out of MVP) — **residual risk**, called out not absorbed | INV-001 |
 | T-002 | Tampering | Client bypasses the mobile Submit-button UX and calls the submission endpoint directly without a Facebook link | A listing publishes with no identity anchor | Server-side enforcement is the *only* gate (system-design: "every rule... is enforced server-side"); client UX is convenience only, never trusted | INV-001, BR-002/BR-008 |
 | T-003 | Tampering | Non-owner user or attacker forges a status-transition call to mark a listing resolved/adopted (griefing) or to keep it "available" past resolution | False "available"/"missing" state persists or a legitimate listing is wrongly hidden | Authz check `changed_by == submitted_by OR is_admin` on every status-transition endpoint; every transition recorded in `StatusHistory` | INV-002, BR-004 |
-| T-004 | Repudiation | Submitter/admin disputes having made a status change | No audit trail to resolve the dispute | `StatusHistory` is append-only, insert-only index on `(listing_id, changed_at)` — already the canonical audit source per data-model | INV-002 |
+| T-004 | Repudiation | Submitter/admin disputes having made a status change | No audit trail to resolve the dispute | `StatusHistory` is append-only, insert-only index on `(listing_id, changed_at)` — already the canonical audit source per data-model. **Named residual gap (added 2026-09-18):** `StatusHistory.changed_by` is nulled on that actor's account deletion (BR-012) — a dispute over a transition made by a since-deleted account can no longer be resolved via this column; accepted as the cost of honoring account deletion, not an oversight | INV-002 |
 | T-005 | Information disclosure | API response leaks `UserLocation.lat/lng` (opt-in subscription) to another user or client | Precise home-area location of an opted-in user exposed | `UserLocation` rows are read only server-side for the radius match; must never appear in any client-facing response — **verify at implementation**, not yet a coded guarantee | Privacy classification (data-model) |
 | T-006 | Information disclosure | `PushToken.token` leaked via logs or an API response | Token reuse enables push spam/impersonation of Whiskr to that device | Token returned only at registration ack, never in any subsequent read path; excluded from audit logs (see Audit & logging) | Secrets handling |
 | T-007 | Tampering / Info disclosure | A normalization bug drops `ScrapedPost.original_post_url` or its rendering | Republished content with no attribution back to the original poster | `original_post_url` is NOT NULL at the schema level; no UI path may render scraped content without the link — **[gap]**: no automated check enforces the *UI* half of this today | INV-003 |
 | T-008 | Elevation of privilege | User sets `is_admin = true` on their own account, or forges an admin-only status transition | Unauthorized resolve/override power over any listing | `is_admin` must not be mutable via any user-facing endpoint; provisioning path is **[assumption]**, undecided — flagged as an open gate, not resolved | BR-004, INV-002 |
 | T-009 | Denial of service / availability | Facebook blocks, rate-limits, or structurally changes pages/groups the scraper polls | Ingestion pipeline (F-001) degrades or stops; feed coverage drops | `ScrapeSource.status` (active/degraded/blocked) is the operational signal; F-002 manual submission is the designed fallback — **this threat is also a named regulatory/kill-criterion risk, treated in its own subsection below, not only here** | Technical kill criterion (`idea.md` §9); see Compliance obligations |
-| T-010 | Spoofing | An attacker replays a Facebook access token obtained for a *different* app (not Whiskr's own Facebook App ID) to log into Whiskr as that Facebook user | Account takeover without the victim ever touching Whiskr | Verify the token's `app_id` via Facebook's `debug_token` endpoint before trusting `fb_user_id` — **[gap]**, not yet confirmed as implemented; flagged in `api-spec.md` API-007 Open questions; guarded by `qa-test-plan.md` TC-008 | `ADR-0001` auth mechanism |
-| T-011 | Denial of service / abuse | A user submits many fake multi-cat batch reports (F-006, API-010) to spam the feed/alert channel, each call producing N listings for the cost of one request | Feed/alert-fanout spam at N-times the cost of a single-cat submission per request | Same per-user write-rate-limit gap already named for API-003/API-004 (Rate limits, `api-spec.md`) now explicitly extends to API-010 at N-times weight — not a new gap, but a heavier instance of the existing one, worth naming now that F-006 exists | F-006 |
+| T-010 | Spoofing | An attacker replays a Facebook access token obtained for a *different* app (not Whiskr's own Facebook App ID) to log into Whiskr as that Facebook user | Account takeover without the victim ever touching Whiskr | **MITIGATED 2026-09-18** — `api-spec.md` API-007 now makes the `debug_token` app-id check mandatory (`technical-design.md` Algorithm 4); guarded by `qa-test-plan.md` TC-008 | `ADR-0001` auth mechanism |
+| T-011 | Denial of service / abuse | A user submits many fake multi-cat batch reports (F-006, API-010) to spam the feed/alert channel, each call producing N listings for the cost of one request | Feed/alert-fanout spam at N-times the cost of a single-cat submission per request | **MITIGATED 2026-09-18** — `api-spec.md` Rate limits now weights API-010 by cat count against the same per-hour budget as API-003, closing the "N listings for the price of one request" gap | F-006 |
 | T-012 | Tampering / Elevation of privilege | A stolen bearer token is used after the legitimate user has logged out (API-012) | Continued account access after the user believed they were logged out | `Session.revoked_at` is checked on every authenticated call (not cached); a revoked session is rejected identically to an expired one | Session mechanism (`data-model.md`) |
+| T-013 | Tampering | A client submits an arbitrary `photo_url` on API-003/API-010 that was never actually uploaded, or reuses another user's already-consumed upload URL | Listings display broken/missing images; or one user's uploaded photo is silently attributed to a different, unrelated listing | **MITIGATED 2026-09-18** — `data-model.md`'s `PhotoUpload` table + BR-013 require every `photo_url` to match an unconsumed row owned by the caller, and an object-store existence check, before a `Listing` can reference it (`technical-design.md` `validatePhotoUpload()`) | BR-013 |
+| T-014 | Spoofing / brute force | An attacker repeatedly guesses a 6-digit OTP code to hijack another user's phone-verification flow, or floods a phone number with SMS to run up cost/harass the number's real owner | Account verification granted to an attacker; SMS cost/harassment abuse | `PhoneVerification.attempt_count` locks out at 5 wrong guesses per cycle (`429`); API-017's 5/hour-per-user-and-per-phone rate limit bounds flood attempts from either direction (`api-spec.md` Rate limits) | F-102, BR-016 |
 
 ## Abuse & safety-specific risks (ethical)
 
@@ -151,9 +156,14 @@ flags it as "the single most consequential, hardest-to-reverse choice in this do
   random value hashed and looked up in the `Session` table (not a signed/verifiable-offline JWT).
   The token generation source must be a cryptographically secure random generator — a requirement on
   the implementation, not a secret to store.
-- **Facebook App Secret** — used server-side if the chosen Graph API verification call requires it
-  (e.g., an app-access-token for the `debug_token` check, T-010) — referenced via secret store,
-  never inlined; distinct from any per-user Facebook access token, which is never persisted at all.
+- **Facebook App Secret** — used server-side for the (now mandatory) `debug_token` app-access-token
+  call (T-010) — referenced via secret store, never inlined; distinct from any per-user Facebook
+  access token, which is never persisted at all.
+- **SMS/OTP provider credentials** (F-102 phone verification) — **[assumption]**, vendor
+  unconfirmed (`system-design.md`); referenced via secret store, never inlined — same pattern as the
+  push-provider credentials above.
+- **Object-store credentials** (F-002/F-006 photo upload, API-011's presigned-URL issuance) —
+  **[assumption]**, vendor unconfirmed; referenced via secret store, never inlined.
 - **Service credential for scraper → Backend API** (see Authn/authz gap, T-009 context) — currently
   undesigned; flagged, not invented here.
 - No secret value is ever written into this document or any doc in this set.
@@ -169,10 +179,11 @@ flags it as "the single most consequential, hardest-to-reverse choice in this do
 - **`ScrapedPost.raw_content_snapshot`** is retained for dedup/audit only, never surfaced verbatim
   in the UI beyond the original link (INV-003).
 - **Must NOT be logged in plaintext, ever:** `PushToken.token`, `User.fb_user_id`, the client-supplied
-  `fb_access_token` at login (verified once, never persisted or logged), precise `UserLocation.lat/lng`
-  outside the server-side radius-match code path. General application logs must not carry these
-  fields — this is a requirement on the eventual implementation, not yet a verified property of any
-  code.
+  `fb_access_token` at login (verified once, never persisted or logged), the raw OTP code sent via
+  SMS (`PhoneVerification`, only ever sent, never logged or stored), `User.phone_number`, and
+  precise `UserLocation.lat/lng` outside the server-side radius-match code path. General application
+  logs must not carry these fields — this is a requirement on the eventual implementation, not yet a
+  verified property of any code.
 
 ## Incident response basics
 
@@ -209,3 +220,10 @@ flags it as "the single most consequential, hardest-to-reverse choice in this do
       `ADR-0001`). — {date}
 - [ ] `Session.token_hash` (never the raw token) is the only thing persisted for a bearer token; no
       API response ever echoes back a stored `token_hash`. — {date}
+- [ ] Every `photo_url` on API-003/API-010 is validated against `PhotoUpload` (ownership + not
+      consumed) and a real object-store existence check before a `Listing` commits (BR-013,
+      T-013). — {date}
+- [ ] `is_admin`, `is_verified`, and every `verified_*` timestamp are rejected (not silently
+      ignored) if present in an API-009 request body (BR-010, BR-014). — {date}
+- [ ] The Facebook `debug_token` app-id check runs on every API-007 call, not just at initial
+      rollout (T-010). — {date}

@@ -30,6 +30,14 @@
 - **Backend API — Report Batch Service** (added 2026-09-18, F-006) — owns `createBatchListings()`
   (Algorithm 5). Calls into the same Listing Write Service's `gateListingWrite()` once per cat, never
   duplicating F-005/INV-001 enforcement.
+- **Backend API — Photo Upload Service** (added 2026-09-18, BR-013) — owns
+  `requestPhotoUploadUrl()` and `validatePhotoUpload()`; the latter is called by both the Listing
+  Write Service and the Report Batch Service, never duplicated.
+- **Backend API — Verification Service** (added 2026-09-18, F-102) — owns
+  `sweepAccountVerification()` (Algorithm 8, a scheduled worker like the staleness sweep) and the
+  phone-OTP pair `startPhoneVerification()`/`confirmPhoneVerification()` (Algorithm 9). The
+  Facebook-signal check itself lives inline in the Auth Service's `loginWithFacebook()`
+  (Algorithm 4), not here, since it only ever runs once, at signup.
 - **Data store** — `Listing`, `FacebookAnchor`, `ScrapedPost`, `StatusHistory`, `Alert`,
   `AlertDelivery`, `UserLocation`, `PushToken`, `Session`, `ReportBatch` (all from `data-model.md`;
   the last two added 2026-09-18, no other new entities).
@@ -53,7 +61,10 @@ sweepStaleListings(now: timestamp, staleness_window: duration) -> int         # 
 
 # Location-based alerting (worker)
 createAlertAndFanout(listing: Listing) -> Optional[Alert]                     # Algorithm 2
-findOptedInUsersWithinRadius(lat, lng, radius_km) -> Iterator[User]
+findOptedInUsersWithinRadius(lat, lng) -> Iterator[User]   # FIXED 2026-09-18: dropped the
+    # radius_km param — it didn't match the 2-arg call site below, and per the resolved "radius
+    # source" design each recipient's own UserLocation.radius_km is the match distance, not a
+    # single global radius passed in
 fanoutJob(alert_id: uuid) -> None
 
 # Auth Service (Backend API) — added 2026-09-18, ADR-0001
@@ -69,6 +80,15 @@ createBatchListings(cats: list[ListingDraft], fb_profile_url: str, actor: User) 
 deleteAccount(actor: User) -> None                                            # API-015
 optOutOfLocation(actor: User) -> None                                         # API-013
 unregisterPushToken(token_id: uuid, actor: User) -> None                      # API-014
+
+# Photo Upload Service (Backend API) — added 2026-09-18, BR-013
+requestPhotoUploadUrl(content_type: str, actor: User) -> PhotoUploadResult    # API-011
+validatePhotoUpload(photo_url: str, actor: User) -> PhotoUpload              # called by gateListingWrite/createBatchListings
+
+# Verification Service (Backend API) — added 2026-09-18, F-102
+sweepAccountVerification(now: timestamp) -> int                              # Algorithm 8, scheduled
+startPhoneVerification(phone_number: str, actor: User) -> None               # Algorithm 9; API-017
+confirmPhoneVerification(code: str, actor: User) -> None                     # Algorithm 9; API-018
 ```
 
 ## Algorithms
@@ -86,15 +106,28 @@ ingestScrapedPost(post):
     # a false negative just yields two visible listings, cheaper than fuzzy-match false positives
     # silently collapsing two distinct real cats.
 
-    if original is not None and original.duplicate_of is None:
-        # collapse into the existing canonical listing
-        dup = gateListingWrite(ListingDraft(post, duplicate_of=original.id), actor=None)
-        ScrapedPost.insert(scrape_source_id=post.source_id, listing_id=dup.id,
-                            original_post_url=post.url, dedup_hash=dedup_hash)  # INV-003: URL kept
-        return  # no alert fanout for a duplicate row — see Algorithm 2 guard
+    # FIXED 2026-09-18 — both gateListingWrite() calls below previously had no error handling at
+    # all: a ValidationError (e.g. the post's profile/page link fails BR-008) would propagate
+    # uncaught out of this function, when "Error-handling strategy" (below) and FRD-F001's own
+    # Error handling table already documented the correct behavior as "reject before write, log
+    # source_post_url + reason, feed unaffected" — a graceful drop, never a crash of the ingest
+    # job. The two now match.
+    try:
+        if original is not None and original.duplicate_of is None:
+            # collapse into the existing canonical listing
+            dup = gateListingWrite(ListingDraft(post, duplicate_of=original.id), actor=None)
+            ScrapedPost.insert(scrape_source_id=post.source_id, listing_id=dup.id,
+                                original_post_url=post.url, dedup_hash=dedup_hash)  # INV-003: URL kept
+            return  # no alert fanout for a duplicate row — see Algorithm 2 guard
 
-    # no match: this becomes the canonical listing
-    canonical = gateListingWrite(ListingDraft(post, duplicate_of=None), actor=None)  # Algorithm 3
+        # no match: this becomes the canonical listing
+        canonical = gateListingWrite(ListingDraft(post, duplicate_of=None), actor=None)  # Algorithm 3
+    except ValidationError as e:
+        log(source_post_url=post.url, reason=e.reason)   # BR-008 gate failure or similar;
+        return                                             # no Listing/ScrapedPost row for this
+                                                             # post — nothing to roll back, feed
+                                                             # continues serving the last known-
+                                                             # good state (system-design.md)
     ScrapedPost.insert(scrape_source_id=post.source_id, listing_id=canonical.id,
                         original_post_url=post.url, dedup_hash=dedup_hash)
 ```
@@ -103,16 +136,30 @@ constraints); geo-bucketing keeps the match query narrow without a full-table sc
 
 ### 1b. Status transition + INV-002 enforcement
 
+> **Fixed 2026-09-18 — this algorithm previously contradicted `frd.md` F-003 and its own
+> state-transition table.** Two bugs, found during a docs-completeness audit before any code was
+> written: (1) `TERMINAL_STATUSES` omitted `found`, so a `found` listing was never guarded by the
+> terminal check and could illegally transition back to `available`/`missing` — a direct INV-002
+> breach the FRD's own transition table already forbids ("any of `{adopted, found, resolved}` →
+> `available` or `missing`: No — rejected unconditionally"). (2) the guard had an `and not
+> actor.is_admin` exception, silently allowing an admin to reopen a terminal listing — contradicting
+> `frd.md`'s explicit "no override, including for admins." Both are fixed below; nothing had been
+> built against the buggy version.
+
 ```
-TERMINAL_STATUSES = {adopted, resolved}          # never "available" again, by definition
-ACTIVE_STATUSES    = {available, on_hold, missing, found}
+TERMINAL_STATUSES = {adopted, found, resolved}   # never "available"/"missing" again, by definition
+ACTIVE_STATUSES    = {available, on_hold, missing}
 
 transitionStatus(listing_id, new_status, actor):
     begin transaction
         listing = SELECT Listing WHERE id = listing_id FOR UPDATE   # row lock: no concurrent
                                                                       # transition races INV-002
-        if listing.status in TERMINAL_STATUSES and not actor.is_admin:
-            abort transaction; raise Conflict("listing already resolved")  # BR-004 gate
+        if actor.id != listing.submitted_by and not actor.is_admin:
+            abort transaction; raise Forbidden("not the submitter or an admin")   # BR-004 gate:
+                                                                      # WHO may attempt at all
+        if listing.status in TERMINAL_STATUSES:
+            abort transaction; raise Conflict("listing already resolved")   # INV-002 gate:
+            # unconditional — no actor.is_admin exception. Terminal means terminal, full stop.
         old_status = listing.status
         listing.status = new_status
         if new_status in TERMINAL_STATUSES:
@@ -124,6 +171,12 @@ transitionStatus(listing_id, new_status, actor):
 
     if old_status != 'missing' and new_status == 'missing':
         createAlertAndFanout(listing)   # Algorithm 2, enqueued async — never blocks this call
+        # Note (2026-09-18): per the transition table above, no transition ever lands ON
+        # `missing` — it is reachable only at creation (see gateListingWrite's own trigger,
+        # Algorithm 3, which is the one that actually fires today). This branch is intentionally
+        # kept as defensive/forward-compatible code satisfying the PRD's literal F-004 EARS
+        # wording ("created OR UPDATED to status missing") in case a future BR change ever adds a
+        # transition back into `missing` — not dead code to delete, just currently unreachable.
     return listing
 
 isVisibleAsActive(listing):
@@ -175,9 +228,15 @@ fanoutJob(alert_id):
     alert   = SELECT Alert WHERE id = alert_id
     listing = SELECT Listing WHERE id = alert.listing_id
     for user in findOptedInUsersWithinRadius(listing.location_lat, listing.location_lng):
-        # geo query: UserLocation WHERE location_opt_in = true
-        #   AND ST_DWithin(point(lat,lng), point(listing.location_lat,listing.location_lng),
-        #                   user.radius_km)          -- see note below on radius source
+        # geo query: FIXED 2026-09-18 — previously read "UserLocation WHERE location_opt_in =
+        # true," but location_opt_in is a User column, not a UserLocation column
+        # (data-model.md); a query written that literally would fail (no such column). The
+        # correct gate is simpler: a UserLocation row's mere EXISTENCE already means opted-in,
+        # because API-013 (opt-out, added 2026-09-18) deletes the row entirely rather than
+        # flagging it — so no extra opt-in filter is needed at all:
+        #   SELECT User.id FROM UserLocation JOIN User ON UserLocation.user_id = User.id
+        #   WHERE ST_DWithin(point(lat,lng), point(listing.location_lat,listing.location_lng),
+        #                     UserLocation.radius_km)   -- see note below on radius source
         # paginated in batches (cursor over UserLocation) to bound memory in dense areas
         if AlertDelivery.exists(alert_id=alert.id, user_id=user.id):
             continue   # unique(alert_id, user_id) per data-model.md — idempotent on job retry
@@ -185,18 +244,28 @@ fanoutJob(alert_id):
                                          delivered_at=null, opened_at=null)
         for token in PushToken.where(user_id=user.id):
             try:
+                # payload_for() was referenced but never defined until this fix (2026-09-18) —
+                # shape per frd.md F-004 Outputs: title, body, deep link to the listing detail.
+                # payload_for(listing) -> { title: "A cat may be missing near you",
+                #                           body: listing.description[:140],
+                #                           deep_link: f"whiskr://listings/{listing.id}" }
+                #   -- [assumption]: exact copy and deep-link URL scheme are illustrative, not
+                #   sourced from any upstream doc; confirm at scaffold (mobile deep-link config).
                 pushProvider.send(token, payload_for(listing))
                 delivery.delivered_at = now(); delivery.save()
                 break   # one successful delivery per user is enough
             except PushProviderError as e:
                 log(e)   # never fails the job; retried/logged, per system-design
 ```
-**Open question (radius source):** `UserLocation.radius_km` (per-user opt-in preference) and
-`Alert.radius_km` (BR-006 default snapshot) are two distinct fields in `data-model.md`; this
-design uses the user's own `radius_km` as the match distance and treats `Alert.radius_km` as an
-audit snapshot of the default policy in effect at trigger time, not as the query parameter. This
-reconciliation is not explicit in `data-model.md` — flagged for the data-model owner to confirm,
-not asserted as fact.
+**Radius source — RESOLVED 2026-09-18:** `UserLocation.radius_km` (per-user opt-in preference) and
+`Alert.radius_km` (BR-006 default snapshot) are two distinct fields in `data-model.md`. This design
+confirms the reconciliation this doc previously only proposed: `UserLocation.radius_km` **is** the
+query parameter `fanoutJob()` matches against (fixed above, alongside the `findOptedInUsersWithinRadius`
+signature mismatch); `Alert.radius_km` is only ever an audit snapshot of the default policy in
+effect at trigger time, never read by the fanout query itself. Since `BR-006`'s radius isn't
+user-configurable at MVP (no UI to change it from the 5 km default), the two values are identical
+in practice today — this reconciliation only becomes behaviorally visible if/when radius
+customization ships post-MVP.
 
 Complexity: O(k) candidates within the geo index (`Listing`/`UserLocation` geo index per
 `data-model.md`) × O(tokens per user); batched to avoid unbounded memory on a dense radius query
@@ -215,48 +284,97 @@ validateFacebookAnchor(candidateUrl):
         return AnchorValidationResult(valid=False, reason="unresolvable_or_private")
     return AnchorValidationResult(valid=True, normalized_url=normalize(candidateUrl))
 
+validatePhotoUpload(photo_url, actor):
+    # BR-013, added 2026-09-18 — closes the gap where photo_url was trusted as opaque client text
+    upload = PhotoUpload.find_by(photo_url=photo_url)
+    if upload is None or upload.user_id != actor.id:
+        raise ValidationError(field="photo_url", reason="unrecognized_or_not_yours")   # -> 400
+    if upload.consumed_at is not None:
+        raise ValidationError(field="photo_url", reason="already_used")                # -> 400
+    if not objectStore.exists(photo_url):        # HEAD check against the real bucket — proves
+                                                   # the client actually uploaded something, not
+                                                   # just that it asked for a URL
+        raise ValidationError(field="photo_url", reason="object_not_found")            # -> 400
+    return upload   # caller marks upload.consumed_at = now() inside the same transaction as the
+                    # Listing insert below — never before, so a failed submission leaves the
+                    # upload URL reusable
+
 gateListingWrite(draft, actor):
     # single gate for BOTH pipelines — system-design: "both pipelines converge on the same
-    # Listing write path in the Backend API"
+    # Listing write path in the Backend API". photo validation only applies to the manual path
+    # (draft.source == 'manual'); scraped posts carry their own photo_url from the source post,
+    # never a Whiskr-issued PhotoUpload row.
     result = validateFacebookAnchor(draft.fb_profile_url)
     if not result.valid:
         raise ValidationError(field="fb_profile_url", reason=result.reason)
         # manual path -> 422, mobile Submit stays disabled (BR-001/BR-002 UX)
         # scraper path -> post is dropped; no Listing/ScrapedPost row is ever persisted for it
+    upload = validatePhotoUpload(draft.photo_url, actor) if draft.source == 'manual' else None
     begin transaction
         listing = Listing.insert(draft.fields())
         FacebookAnchor.insert(listing_id=listing.id, fb_profile_url=result.normalized_url,
                                resolved_at_submit=true)
         # one transaction: no code path commits Listing without also committing FacebookAnchor —
         # this IS the INV-001 enforcement ("a Listing write SHALL NEVER commit without one")
+        if upload is not None:
+            upload.consumed_at = now(); upload.save()   # BR-013: one photo, one listing
     commit transaction
+
+    if listing.status == 'missing':
+        createAlertAndFanout(listing)   # Algorithm 2, enqueued async — never blocks this call.
+        # FIXED 2026-09-18 — this call was missing here entirely, even though the sequence
+        # diagram below always documented it ("Backend API -> Alerting worker: enqueue (if
+        # status == missing)") and createBatchListings() (Algorithm 5) already had the
+        # equivalent per-cat call. Per the F-003 transition table, `missing` is reachable ONLY
+        # at creation — there is no transition INTO missing from any other status — which means
+        # transitionStatus()'s own alert trigger (Algorithm 1b, "if old_status != 'missing' and
+        # new_status == 'missing'") can never actually fire in practice: nothing ever transitions
+        # into missing, everything is CREATED at missing. Without this line, F-004 — the entire
+        # location-based alert feature, arguably the single most safety-critical part of the
+        # product (a lost cat's owner depends on it) — would never have fired for a single real
+        # submission. createAlertAndFanout()'s own `duplicate_of` guard already prevents a
+        # re-scraped duplicate from double-alerting, so this is safe to call unconditionally here
+        # for both the manual and scraper pipelines that share this one function.
     return listing
 ```
-Complexity: O(1) pattern check + one resolvability call per candidate write; no batching needed
+Complexity: O(1) pattern check + one resolvability call per candidate write, plus one indexed
+`PhotoUpload` lookup and one object-store `HEAD` call on the manual path only; no batching needed
 (gate runs synchronously per write, on both the manual endpoint and the ingestion worker).
 
 ### 4. Facebook OAuth login + session issuance / revocation (`ADR-0001`)
 
 ```
 verifyFacebookToken(fb_access_token):
-    resp = graphAPI.get("/me", params={"access_token": fb_access_token, "fields": "id,name"})
+    resp = graphAPI.get("/me", params={"access_token": fb_access_token,
+                                         "fields": "id,name,picture"})
     if resp.status != 200:
         raise AuthError(reason="invalid_or_expired_token")
-    # [assumption] app-id check — see security-compliance.md T-010; strongly recommended,
-    # not yet confirmed as implemented:
-    #   debug = graphAPI.get("/debug_token", params={"input_token": fb_access_token,
-    #                                                 "access_token": WHISKR_APP_ACCESS_TOKEN})
-    #   if debug.data.app_id != WHISKR_FB_APP_ID:
-    #       raise AuthError(reason="wrong_app_id")
-    return FacebookIdentity(fb_user_id=resp.id, name=resp.name)
+    # MANDATORY as of 2026-09-18 (was "recommended, not confirmed" — resolved per
+    # security-compliance.md T-010; skipping this check is the exact stolen-token-from-
+    # another-app replay T-010 names):
+    debug = graphAPI.get("/debug_token", params={"input_token": fb_access_token,
+                                                  "access_token": WHISKR_APP_ACCESS_TOKEN})
+    if debug.data.app_id != WHISKR_FB_APP_ID:
+        raise AuthError(reason="wrong_app_id")
+    return FacebookIdentity(fb_user_id=resp.id, name=resp.name,
+                             has_real_photo=not resp.picture.data.is_silhouette)
 
 loginWithFacebook(fb_access_token):
     identity = verifyFacebookToken(fb_access_token)      # raises AuthError on failure -> 401
     user = User.find_by(fb_user_id=identity.fb_user_id)
     is_new = user is None
     if is_new:
-        user = User.insert(fb_user_id=identity.fb_user_id, display_name=identity.name,
-                            location_opt_in=false, is_admin=false)
+        fb_signals_ok = identity.has_real_photo and " " in identity.name.strip()  # FRD-F102-01
+        try:
+            user = User.insert(fb_user_id=identity.fb_user_id, display_name=identity.name,
+                                location_opt_in=false, is_admin=false,
+                                fb_signals_verified_at=(now() if fb_signals_ok else null))
+        except UniqueConstraintViolation:   # race: two concurrent first-time logins, same
+                                             # fb_user_id — data-model.md's unique constraint
+                                             # catches it; treat the loser as a normal login,
+                                             # never a 500 or a duplicate account
+            user = User.find_by(fb_user_id=identity.fb_user_id)
+            is_new = false
     raw_token = crypto.secure_random(32)                  # opaque token, never a JWT
     Session.insert(user_id=user.id, token_hash=sha256(raw_token),
                     expires_at=now() + 90_days)
@@ -292,14 +410,18 @@ createBatchListings(cats, fb_profile_url, actor):
     if not result.valid:
         raise ValidationError(field="fb_profile_url", reason=result.reason)        # -> 422, no writes
 
+    uploads = [validatePhotoUpload(c.photo_url, actor) for c in cats]  # BR-013, per cat, before
+                                                                          # any write — same
+                                                                          # all-or-nothing rule
     begin transaction
         batch = ReportBatch.insert(submitted_by=actor.id)
         listings = []
-        for cat_draft in cats:                              # each cat independently satisfies BR-001
+        for cat_draft, upload in zip(cats, uploads):        # each cat independently satisfies BR-001
             listing = Listing.insert(cat_draft.fields(), submitted_by=actor.id,
                                        batch_id=batch.id, source="manual")
             FacebookAnchor.insert(listing_id=listing.id, fb_profile_url=result.normalized_url,
                                     resolved_at_submit=true)   # INV-001: same gate, per listing
+            upload.consumed_at = now(); upload.save()          # BR-013, per cat
             listings.append(listing)
         # any single cat_draft failing BR-001 field validation raises inside the loop, aborting
         # the whole transaction — FRD-F006-01's all-or-nothing rule
@@ -324,12 +446,25 @@ is still shared; only the per-cat write loop is new.
 
 ```
 deleteAccount(actor):
+    # UPDATED 2026-09-18 — the original version only handled Session/UserLocation/PushToken/
+    # Listing.submitted_by, missing five other FKs to User.id that a full trace turned up:
+    # PhotoUpload, PhoneVerification, AlertDelivery.user_id, Listing.resolved_by, and
+    # StatusHistory.changed_by (BR-012).
     begin transaction
         Session.delete_all(user_id=actor.id)              # immediate logout everywhere
         UserLocation.delete(user_id=actor.id)              # if present
         PushToken.delete_all(user_id=actor.id)
-        Listing.update_all(WHERE submitted_by=actor.id, SET submitted_by=null)  # BR-012: never
-                                                             # cascade-delete a listing itself
+        PhotoUpload.delete_all(user_id=actor.id)            # bookkeeping only; Listing.photo_url
+                                                             # is already a snapshot, unaffected
+        PhoneVerification.delete_all(user_id=actor.id)      # OTP-attempt history only
+        AlertDelivery.delete_all(user_id=actor.id)          # recipient-only audit row; NOT
+                                                             # nullable, so delete not null
+        Listing.update_all(WHERE submitted_by=actor.id, SET submitted_by=null)
+        Listing.update_all(WHERE resolved_by=actor.id, SET resolved_by=null)
+        ReportBatch.update_all(WHERE submitted_by=actor.id, SET submitted_by=null)
+        StatusHistory.update_all(WHERE changed_by=actor.id, SET changed_by=null)
+        # all four update_all calls: never cascade-delete the parent row (BR-012) — other users
+        # or INV-002's own audit guarantee depend on the row surviving, only the identity is scrubbed
         User.delete(actor.id)
     commit transaction
 
@@ -351,6 +486,53 @@ Complexity: O(1) plus O(k) for the `Listing.submitted_by` bulk update, where k =
 listing count (typically small at MVP scale, not a hot path). One transaction so a crash mid-delete
 never leaves a half-deleted account (e.g., sessions revoked but the `User` row still present, or
 vice versa).
+
+### 7. Account verification: track-record sweep + phone OTP (F-102)
+
+```
+sweepAccountVerification(now):
+    UPDATE User
+    SET track_record_verified_at = now
+    WHERE track_record_verified_at IS NULL
+      AND created_at <= now - 30_days
+      AND (SELECT count(*) FROM Listing WHERE submitted_by = User.id) >= 3
+    RETURNING count(*)
+```
+Same shape as `sweepStaleListings()` (Algorithm 1c): a batched `UPDATE`, no per-row branching, runs
+daily. One-way (`WHERE track_record_verified_at IS NULL` means an already-verified account is never
+touched again — matches "never unset once granted," BR-014).
+
+```
+startPhoneVerification(phone_number, actor):
+    if User.exists(phone_number=phone_number, phone_verified_at__not_null=true):
+        raise ConflictError(reason="phone_already_in_use")           # -> 409, BR-016
+    code = crypto.secure_random_digits(6)
+    PhoneVerification.insert(user_id=actor.id, phone_number=normalize_e164(phone_number),
+                               otp_hash=sha256(code), expires_at=now() + 10_minutes)
+    smsProvider.send(phone_number, f"Your Whiskr code is {code}")     # never logged, never stored
+                                                                        # raw beyond this one send
+
+confirmPhoneVerification(code, actor):
+    pv = PhoneVerification.find_latest(user_id=actor.id, verified_at=null)
+    if pv is None or pv.expires_at < now():
+        raise ValidationError(reason="no_pending_or_expired")         # -> 400
+    if pv.attempt_count >= 5:
+        raise TooManyAttemptsError()                                  # -> 429
+    if sha256(code) != pv.otp_hash:
+        pv.attempt_count += 1; pv.save()
+        raise ValidationError(reason="wrong_code")                    # -> 400
+    begin transaction
+        try:
+            User.update(actor.id, phone_number=pv.phone_number, phone_verified_at=now())
+        except UniqueConstraintViolation:      # race: another account confirmed the same
+                                                 # number between start and confirm
+            abort transaction; raise ConflictError(reason="phone_already_in_use")   # -> 409
+        pv.verified_at = now(); pv.save()
+    commit transaction
+```
+Complexity: O(1) per call, one indexed lookup each. The `UniqueConstraintViolation` catch mirrors
+Algorithm 4's signup race-condition handling — same pattern, different table, both trusting the
+database's own uniqueness guarantee rather than a check-then-write race in application code.
 
 ## Sequence diagrams
 
@@ -442,6 +624,12 @@ Backend API -> validateFacebookAnchor(fb_profile_url): pattern + resolvability c
   any single cat's BR-001 field validation failure aborts and rolls back every `Listing`/
   `FacebookAnchor`/`ReportBatch` insert in that call — never an N-1-of-N partial batch
   (FRD-F006-01).
+- **Photo-upload validation failure (BR-013):** raised before the transaction opens — no partial
+  `Listing` write is ever attempted against an unrecognized/reused/missing photo.
+- **Facebook/OTP concurrency races:** both `loginWithFacebook()` and `confirmPhoneVerification()`
+  catch a `UniqueConstraintViolation` from the database rather than doing a check-then-write race in
+  application code — the database's unique index is the actual source of truth for "does this
+  fb_user_id/phone_number already exist," never re-derived optimistically.
 
 ## Key decisions
 
@@ -467,3 +655,11 @@ Backend API -> validateFacebookAnchor(fb_profile_url): pattern + resolvability c
 - **Facebook-anchor validated once per batch, not once per cat** (`createBatchListings()`) — a
   deliberate, named divergence from "one shared gate for both pipelines" specifically to satisfy
   BR-009 without N redundant resolvability calls against the same URL in one request.
+- **Account verification is three independent OR'd signals, not a tiered ladder** — each of
+  `fb_signals_verified_at`/`track_record_verified_at`/`phone_verified_at` is set independently;
+  `is_verified` is their disjunction. Chosen over a single ladder/tier so a strong signal (phone)
+  isn't gated behind a weaker one (Facebook heuristic) that already failed.
+- **Facebook-signal check runs once, at signup, never re-evaluated** — avoids re-fetching the
+  Graph API on every login for a check whose input (profile photo/name) users rarely change back
+  to a "worse" state; a user who later improves their Facebook profile can still reach verified
+  status via the other two paths.

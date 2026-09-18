@@ -41,8 +41,14 @@ _(From `idea.md` §2; single target segment, two situational modes.)_
   via Facebook OAuth, and lands on Home/Feed with an account (display name sourced from Facebook, no
   password to set or remember — `ADR-0001`).
 - **UJ-006** — View/edit profile: a signed-in user opens their profile, sees display name, admin
-  status, and location-alert opt-in state, can edit their display name (BR-010), opt out of
-  location-based alerts entirely, log out (BR-011), or delete their account (BR-012).
+  status, location-alert opt-in state, and their verification badge status, can edit their display
+  name (BR-010), opt out of location-based alerts entirely, log out (BR-011), or delete their
+  account (BR-012).
+- **UJ-007** — Become verified: a signed-in user's account is automatically marked verified the
+  moment it first satisfies any one of F-102's three criteria — at signup (Facebook profile
+  signals, no user action), passively over time (track record, no user action), or by choosing to
+  verify a phone number (the one path requiring a user-initiated step: enter a number, receive an
+  OTP via SMS, confirm it). No admin review, no waiting period beyond the criteria themselves.
 
 ## Feature list (with priorities)
 <!-- Reuse F-### from idea.md §7 exactly. Do NOT invent feature IDs here. Every row gets a TC. -->
@@ -55,8 +61,8 @@ _(From `idea.md` §2; single target segment, two situational modes.)_
 | F-004 | Location-based missing-cat alert pinned to an area, pushed to nearby users | MVP | §1 | UJ-003 | Default radius 5 km per `usability.md` §1 confirmation copy |
 | F-005 | Every post requires a linked, visible Facebook profile as an identity anchor | MVP | §7 (trust/scam risk) | UJ-001 | Enforces INV-001; blocks Submit until attached per `usability.md` §1 |
 | F-006 | Multi-cat batch report: a single submission reports 2+ cats found/lost together, each becoming its own independently status-tracked listing | MVP | §7 (added 2026-09-18) | UJ-001 (extended) | Additive to F-002; grouped by a shared `ReportBatch` reference, not a new entity type (`decision-ledger.md`) |
+| F-102 | Automated account verification badge (display-only trust signal; granted on Facebook profile signals, in-app track record, or a confirmed phone number) | MVP | §7 (promoted from Final, 2026-09-18) | UJ-007 | Redefined from its original "manual vetting" scope — see `decision-ledger.md`; does not gate submission (product-owner's explicit choice) |
 | F-101 | Photo-based matching suggestions between lost/found reports | Final | §7 | — | Post-MVP; parked per `idea.md` §10 |
-| F-102 | Verified rescuer/page badge program (manual vetting) | Final | §7 | — | Post-MVP |
 | F-103 | In-app messaging between finder/adopter and poster | Final | §7 | — | Post-MVP; parked per `idea.md` §10 |
 | F-104 | Formal partnership/API feed from established rescue pages | Final | §7 | — | Post-MVP; parked per `idea.md` §10; reduces scrape dependency (see system-design rejected-alternative note) |
 
@@ -93,11 +99,33 @@ _(From `idea.md` §2; single target segment, two situational modes.)_
 - **BR-011** — A signed-in user MAY log out (UJ-006), immediately revoking their current session
   token; a revoked token SHALL be rejected on every subsequent authenticated call, identically to an
   expired one (`security-compliance.md` T-012).
-- **BR-012** — A signed-in user MAY delete their account (UJ-006). Deletion SHALL revoke every
-  session, delete the user's `UserLocation` and `PushToken` rows, and set `submitted_by` to null on
-  every listing the user submitted — the listings themselves SHALL NOT be deleted (other users may
-  be relying on an open adoption or active missing-cat listing; only the account's own identity is
-  removed).
+- **BR-012** — A signed-in user MAY delete their account (UJ-006). Deletion SHALL:
+  - **Delete outright** (cascade): every `Session`, `UserLocation`, `PushToken`, `PhotoUpload`, and
+    `PhoneVerification` row belonging to the user (bookkeeping/audit-of-the-user's-own-actions data
+    with no other-user display dependency), and every `AlertDelivery` row where the user was the
+    **recipient** (not nullable — a recipient-only audit row has no reason to persist once the
+    recipient's account is gone).
+  - **Set to `null`, never cascade-delete the parent row**: `submitted_by` on every `Listing` and
+    `ReportBatch` the user submitted, `resolved_by` on every `Listing` the user resolved, and
+    `changed_by` on every `StatusHistory` row the user authored — in all four cases the parent
+    record (listing, batch, transition history) is retained because other users, or the product's
+    own audit/invariant guarantees (INV-002), depend on it continuing to exist; only the deleted
+    user's identity is scrubbed from it. **Named residual limitation, not an oversight:** once
+    `StatusHistory.changed_by` is nulled, a repudiation dispute (who actually changed this status)
+    can no longer be resolved for a transition made by a since-deleted account.
+- **BR-013** — A submission's `photo_url` (F-002/F-006) SHALL correspond to an upload the same
+  authenticated user requested (F-002's photo-upload step) and that has not already been used on a
+  different listing; an unrecognized, already-used, or non-existent `photo_url` SHALL be rejected.
+- **BR-014** — Account verification (F-102) is automatic only: `fb_signals_verified_at`,
+  `track_record_verified_at`, and `phone_verified_at` SHALL NEVER be directly settable via any
+  user-facing or admin-facing endpoint — only the three defined automated checks may set them
+  (mirrors the `is_admin` protection in BR-010).
+- **BR-015** — The verification badge (F-102) is display-only: it SHALL NOT be used, on its own, to
+  grant or deny submission ability, rate limits, or any other server-side privilege (product-owner's
+  explicit scope decision, `decision-ledger.md`).
+- **BR-016** — A confirmed `User.phone_number` (F-102) SHALL be unique across accounts — the same
+  phone number SHALL NOT back a confirmed verification on more than one account at a time (prevents
+  farming multiple verified accounts from one phone number).
 
 ## Hard rules / must-never (invariants — `INV-###`)
 - **INV-001** — the system SHALL NEVER publish a post (scraped or manual) that does not carry a
@@ -145,6 +173,11 @@ _(Grounded in `usability.md` §1, USABILITY CLEARED, approved as-is; not redesig
 - **F-006:** WHEN a user submits a batch report with 2 or more cats, each satisfying BR-001, and one
   shared attached Facebook profile, the system SHALL create one independently status-tracked listing
   per cat, all linked to a single batch reference, visible in the feed within the same session.
+- **F-102:** WHEN a user's account satisfies at least one of the three automated verification
+  criteria (Facebook profile signals at signup, ≥30 days tenure with ≥3 submitted listings, or a
+  confirmed phone number), the system SHALL mark the account verified and display a verification
+  badge on that user's listings and profile; the badge SHALL NEVER be settable directly through any
+  endpoint (BR-014) and SHALL NEVER gate submission ability or rate limits (BR-015).
 
 ## Non-goals
 _(Mirrors `idea.md` §10.)_
@@ -163,6 +196,10 @@ _(Mirrors `idea.md` §10.)_
   mechanism").
 - Push notification delivery (F-004) — platform provider (APNs/FCM) — **[assumption]**, no vendor
   named in the seed; to confirm at scaffold (system-design).
+- SMS/OTP delivery for phone verification (F-102) — **[assumption]**, no vendor named; a new
+  dependency introduced by F-102's phone-verification path, same treatment as the push-provider gap
+  (external, credential-gated, failure must not block the rest of the account — see
+  `system-design.md`/`security-compliance.md`).
 - Device location services (F-004, UJ-002/UJ-003) — user-granted permission; no location, no alert.
 - A Facebook profile/page a user can link to (F-005, INV-001) — the product has no fallback identity
   anchor if a user has no Facebook presence; this is an explicit product constraint, not a gap. This
