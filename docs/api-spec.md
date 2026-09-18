@@ -247,14 +247,16 @@ one envelope:
 ### API-015 — DELETE /users/me — Delete account
 - **Serves:** UJ-006 (profile), the "life of the account; deleted on account-deletion request"
   retention promise every PII field in `data-model.md`/`security-compliance.md` already makes
-- **Description:** Deletes the caller's account and everything scoped to the account alone: all
-  `Session` rows (immediate logout, everywhere), the `UserLocation` row, and all `PushToken` rows.
-  **Listings and report batches the user submitted are retained, not deleted** —
-  `Listing.submitted_by` and `ReportBatch.submitted_by` are set to `null` (the same nullable field
-  scraped listings already use, `data-model.md`), so existing listings other users may be relying on
-  (an open adoption listing, an active missing-cat alert) don't silently vanish out from under the
-  feed; only the account's own identity is removed. This mirrors real-world moderation practice and
-  needs no new schema.
+- **Description:** Deletes the caller's account and cascade-deletes everything scoped to the account
+  alone: all `Session` rows (immediate logout, everywhere), the `UserLocation` row, all `PushToken`
+  rows, all `PhotoUpload` rows, all `PhoneVerification` rows, and every `AlertDelivery` row where the
+  caller was the recipient. **Listings, report batches, and status-history rows the user is
+  referenced from are retained, not deleted** — `Listing.submitted_by`/`resolved_by`,
+  `ReportBatch.submitted_by`, and `StatusHistory.changed_by` are all set to `null` instead (BR-012;
+  full enumeration in `technical-design.md`'s `deleteAccount()`), so existing listings other users
+  may be relying on (an open adoption listing, an active missing-cat alert) and INV-002's own audit
+  trail don't silently vanish out from under anything; only the account's own identity is removed.
+  This mirrors real-world moderation practice and needs no new schema.
 - **Request schema:** none (identity from bearer token).
 - **Response schema:** `204 No Content`.
 - **Auth:** Bearer required.

@@ -256,17 +256,23 @@ Facebook fixture auth if any) referenced by env var name only, never inlined in 
 - **Automation:** `backend/src/auth/__tests__/logout.integration.test.ts` · `npm --prefix backend
   test -- auth/logout.integration -t "T-012"` · red on current codebase (no auth module exists yet).
 
-### TC-011 — account deletion revokes sessions and orphans (not deletes) submitted listings (BR-012)
+### TC-011 — account deletion revokes sessions and orphans (not deletes) referenced records (BR-012)
 - **Covers:** API-015, BR-012
 - **Level:** integration
-- **Preconditions / controlled data:** a signed-in test user who has submitted at least one
-  `Listing`, has an active `Session`, a `UserLocation` row, and a `PushToken` row.
-- **Steps:** call `DELETE /users/me`; then (a) attempt any authenticated call reusing the
-  now-deleted user's old session token, and (b) GET the listing the user submitted.
-- **Expected:** the account-deletion call returns `204`; the reused session token now returns `401`
-  (T-012 semantics — same as a revoked/expired session); `UserLocation`/`PushToken` rows for that
-  user no longer exist; the listing is still returned by the feed/detail read, with
-  `submitted_by: null`.
+- **Preconditions / controlled data:** a signed-in test user (A) who has: submitted a `Listing`
+  (making them `submitted_by`), resolved a *different* listing as admin (making them
+  `resolved_by`/`StatusHistory.changed_by` on that row), submitted a batch (`ReportBatch`), an
+  active `Session`, a `UserLocation` row, a `PushToken` row, an unconsumed `PhotoUpload` row, a
+  `PhoneVerification` row, and was the recipient of an `AlertDelivery` from another user's missing-cat
+  report.
+- **Steps:** call `DELETE /users/me` as user A; then check every row category above.
+- **Expected:** `204`; the reused session token now returns `401` (T-012 semantics); `Session`,
+  `UserLocation`, `PushToken`, `PhotoUpload`, and `PhoneVerification` rows for user A no longer
+  exist; the `AlertDelivery` row where A was the recipient no longer exists; the `Listing` A
+  submitted still exists with `submitted_by: null`; the `Listing` A resolved still exists with
+  `resolved_by: null` and its status unchanged (still resolved, INV-002 unaffected); the
+  `ReportBatch` A submitted still exists with `submitted_by: null`; the `StatusHistory` row A
+  authored still exists with `changed_by: null`, `old_status`/`new_status`/`changed_at` unchanged.
 - **Automation:** `backend/src/auth/__tests__/delete-account.integration.test.ts` · `npm --prefix
   backend test -- auth/delete-account.integration` · red on current codebase.
 

@@ -59,7 +59,7 @@ verification fields is ever settable via any user-facing endpoint (BR-014), same
 | Field | Type | Null? | Default | Description |
 |-------|------|-------|---------|-------------|
 | id | uuid | no | generated | Primary key |
-| user_id | uuid (FK → User.id) | no | — | |
+| user_id | uuid (FK → User.id) | no | — | Row deleted (cascade) on account deletion (BR-012, added 2026-09-18 — was missed originally); purely an OTP-attempt-history bookkeeping row, no other-user dependency |
 | phone_number | text | no | — | E.164-normalized candidate number, not yet confirmed |
 | otp_hash | text | no | — | SHA-256 hash of the OTP code — same never-store-the-raw-value principle as `Session.token_hash` |
 | attempt_count | integer | no | 0 | Incremented on every wrong-code confirm attempt; locked out at 5 (F-102 rate-limit) |
@@ -76,7 +76,7 @@ from also applying here.
 | Field | Type | Null? | Default | Description |
 |-------|------|-------|---------|-------------|
 | id | uuid | no | generated | Primary key |
-| user_id | uuid (FK → User.id) | no | — | Owner of this session |
+| user_id | uuid (FK → User.id) | no | — | Owner of this session; row deleted (cascade) on account deletion, BR-012 |
 | token_hash | text | no | — | SHA-256 hash of the bearer token returned to the client at API-007; the raw token itself is never stored, only its hash — same principle as password hashing, so a data-store leak alone does not yield directly reusable tokens |
 | created_at | timestamp | no | now() | |
 | expires_at | timestamp | no | `created_at + 90 days` | Fixed 90-day expiration — **[assumption]**, no session-lifetime policy exists in the seed; re-login (a fresh Facebook OAuth round trip, not a "refresh") is required after expiry, consistent with there being no forgot-password/refresh-token flow (`ADR-0001`) |
@@ -92,7 +92,7 @@ denylist (an equivalent extra data-store lookup anyway, at more complexity) — 
 | Field | Type | Null? | Default | Description |
 |-------|------|-------|---------|-------------|
 | id | uuid | no | generated | Primary key |
-| user_id | uuid (FK → User.id) | no | — | Who requested the upload URL (API-011) |
+| user_id | uuid (FK → User.id) | no | — | Who requested the upload URL (API-011). Row deleted (cascade) on account deletion (BR-012, added 2026-09-18 — was missed originally); safe because `Listing.photo_url` is a stored snapshot, not a live reference to this table, so deleting this bookkeeping row never affects an already-published listing's photo |
 | photo_url | text | no | — | The exact URL returned to the client; unique — this is what `Listing.photo_url` must match |
 | content_type | enum(image/jpeg, image/png, image/heic) | no | — | Echoes API-011's request |
 | created_at | timestamp | no | now() | |
@@ -156,7 +156,7 @@ the batch grouping is retained, only the account identity is removed.
 | duplicate_of | uuid (FK → Listing.id) | yes | null | Self-reference; set when the dedup match (F-001) collapses a re-scraped post into an existing listing |
 | batch_id | uuid (FK → ReportBatch.id) | yes | null | Set when this listing was created as part of a multi-cat batch report (F-006); null for single-cat submissions and all scraped listings |
 | resolved_at | timestamp | yes | null | Set only on an explicit BR-004 status transition to `resolved`/`adopted`/`found` |
-| resolved_by | uuid (FK → User.id) | yes | null | Submitter or admin who resolved it (BR-004) |
+| resolved_by | uuid (FK → User.id) | yes | null | Submitter or admin who resolved it (BR-004); set to `null` on that user's account deletion (BR-012, added 2026-09-18 — was missed in the original account-deletion cascade) |
 | created_at | timestamp | no | now() | |
 | updated_at | timestamp | no | now() | |
 
@@ -195,7 +195,7 @@ the batch grouping is retained, only the account identity is removed.
 | listing_id | uuid (FK → Listing.id) | no | — | |
 | old_status | enum (same set as Listing.status) | no | — | |
 | new_status | enum (same set as Listing.status) | no | — | |
-| changed_by | uuid (FK → User.id) | yes | null | Null for system-driven staleness flags (which do not touch `status` — see `Listing.is_stale`); populated for every explicit BR-004 transition |
+| changed_by | uuid (FK → User.id) | yes | null | Null for system-driven staleness flags (which do not touch `status` — see `Listing.is_stale`); populated for every explicit BR-004 transition. Also set to `null` on that user's account deletion (BR-012, added 2026-09-18) — the transition record itself (`old_status`, `new_status`, `changed_at`) is retained for INV-002/TC-N02, only the actor's identity is removed; **named residual limitation:** a repudiation dispute (T-004) arising after the actor's account is deleted can no longer be resolved by this column, since the FK is gone — an accepted trade-off for honoring account deletion, not an oversight |
 | changed_at | timestamp | no | now() | Append-only; this table is the audit trail INV-002 verification (TC-N02) reads |
 
 ### Alert
@@ -211,7 +211,7 @@ the batch grouping is retained, only the account identity is removed.
 |-------|------|-------|---------|-------------|
 | id | uuid | no | generated | Primary key |
 | alert_id | uuid (FK → Alert.id) | no | — | |
-| user_id | uuid (FK → User.id) | no | — | Recipient within radius at trigger time |
+| user_id | uuid (FK → User.id) | no | — | Recipient within radius at trigger time. **Not nullable** (unlike `Listing.submitted_by`/`resolved_by`/`StatusHistory.changed_by`) — added 2026-09-18: on that recipient's account deletion, the row is **deleted (cascade)**, not nulled, since a recipient-only audit row has no other-user display dependency the way a `Listing` does; a minor, accepted reduction in historical fanout-count precision, not a correctness issue |
 | delivered_at | timestamp | yes | null | Null until the push provider confirms/attempts delivery |
 | opened_at | timestamp | yes | null | Set if/when the user taps the notification |
 

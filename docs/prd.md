@@ -99,11 +99,20 @@ _(From `idea.md` §2; single target segment, two situational modes.)_
 - **BR-011** — A signed-in user MAY log out (UJ-006), immediately revoking their current session
   token; a revoked token SHALL be rejected on every subsequent authenticated call, identically to an
   expired one (`security-compliance.md` T-012).
-- **BR-012** — A signed-in user MAY delete their account (UJ-006). Deletion SHALL revoke every
-  session, delete the user's `UserLocation` and `PushToken` rows, and set `submitted_by` to null on
-  every listing and `ReportBatch` the user submitted — the listings themselves SHALL NOT be deleted
-  (other users may be relying on an open adoption or active missing-cat listing; only the account's
-  own identity is removed).
+- **BR-012** — A signed-in user MAY delete their account (UJ-006). Deletion SHALL:
+  - **Delete outright** (cascade): every `Session`, `UserLocation`, `PushToken`, `PhotoUpload`, and
+    `PhoneVerification` row belonging to the user (bookkeeping/audit-of-the-user's-own-actions data
+    with no other-user display dependency), and every `AlertDelivery` row where the user was the
+    **recipient** (not nullable — a recipient-only audit row has no reason to persist once the
+    recipient's account is gone).
+  - **Set to `null`, never cascade-delete the parent row**: `submitted_by` on every `Listing` and
+    `ReportBatch` the user submitted, `resolved_by` on every `Listing` the user resolved, and
+    `changed_by` on every `StatusHistory` row the user authored — in all four cases the parent
+    record (listing, batch, transition history) is retained because other users, or the product's
+    own audit/invariant guarantees (INV-002), depend on it continuing to exist; only the deleted
+    user's identity is scrubbed from it. **Named residual limitation, not an oversight:** once
+    `StatusHistory.changed_by` is nulled, a repudiation dispute (who actually changed this status)
+    can no longer be resolved for a transition made by a since-deleted account.
 - **BR-013** — A submission's `photo_url` (F-002/F-006) SHALL correspond to an upload the same
   authenticated user requested (F-002's photo-upload step) and that has not already been used on a
   different listing; an unrecognized, already-used, or non-existent `photo_url` SHALL be rejected.

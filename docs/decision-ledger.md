@@ -52,6 +52,34 @@ architecture, tests, or task state; those stay in their canonical docs.
 
 ## 3. Pivots & decisions (newest first, append at top)
 
+### 2026-09-18 — Account-deletion cascade was incomplete (5 of 10 User FKs missed; found and fixed)
+- **Type:** decision (a hole found during a fifth docs-completeness audit pass, requested directly
+  by the product owner and directed at this specific area)
+- **Change:** traced every foreign key in `data-model.md` pointing at `User.id` (10 total) against
+  BR-012's original enumeration and found only 5 were actually handled
+  (`Session`/`UserLocation`/`PushToken` cascade-deleted, `Listing.submitted_by`/`ReportBatch.
+  submitted_by` nulled). The other 5 were silent gaps: `Listing.resolved_by` and `StatusHistory.
+  changed_by` (should null, same reasoning as `submitted_by` — retain the record, scrub the
+  identity) were never mentioned at all; `PhotoUpload.user_id` and `PhoneVerification.user_id`
+  (bookkeeping-only, safe to cascade-delete) were never mentioned; `AlertDelivery.user_id` is
+  **not nullable**, so it needed a cascade-delete decision, not a null, and had neither.
+- **Why:** without this, deleting an account would either violate a `NOT NULL` foreign-key
+  constraint outright (`AlertDelivery`) or silently leave orphaned rows/PII behind
+  (`PhotoUpload`/`PhoneVerification`) or leave a dangling reference an ORM might not even
+  flag until it broke in production (`resolved_by`/`changed_by`). A "delete my account" feature
+  that doesn't actually delete/scrub everything it should is a real product and compliance problem
+  (RA 10173, `security-compliance.md`'s Compliance obligations section), not a cosmetic gap.
+- **Alternatives rejected:** leaving `AlertDelivery.user_id` nullable-and-null instead of
+  cascade-delete — rejected because a recipient-only audit row (unlike a `Listing`, which other
+  users see and rely on) has no reason to persist once its sole subject's account is gone; deleting
+  `Listing`/`ReportBatch`/`StatusHistory` rows outright instead of nulling — rejected, unchanged
+  from the original BR-012 reasoning (other users and INV-002's audit guarantee depend on them).
+- **Invalidated:** none — additive corrections to BR-012/`deleteAccount()`, not a reversal.
+- **Recorded as:** none — a straightforward completeness fix, not a new trade-off; the one
+  genuinely new trade-off (nulling `StatusHistory.changed_by` weakens T-004's repudiation mitigation
+  for a deleted actor) is named inline in `security-compliance.md` T-004 and `prd.md` BR-012, not
+  hidden in this ledger alone.
+
 ### 2026-09-18 — F-004's alert trigger was wired to a function it could never reach (bug found and fixed)
 - **Type:** decision (a hole found during a third docs-completeness audit pass, not a pivot — no
   prior stated design intended this)

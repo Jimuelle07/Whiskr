@@ -446,12 +446,25 @@ is still shared; only the per-cat write loop is new.
 
 ```
 deleteAccount(actor):
+    # UPDATED 2026-09-18 — the original version only handled Session/UserLocation/PushToken/
+    # Listing.submitted_by, missing five other FKs to User.id that a full trace turned up:
+    # PhotoUpload, PhoneVerification, AlertDelivery.user_id, Listing.resolved_by, and
+    # StatusHistory.changed_by (BR-012).
     begin transaction
         Session.delete_all(user_id=actor.id)              # immediate logout everywhere
         UserLocation.delete(user_id=actor.id)              # if present
         PushToken.delete_all(user_id=actor.id)
-        Listing.update_all(WHERE submitted_by=actor.id, SET submitted_by=null)  # BR-012: never
-                                                             # cascade-delete a listing itself
+        PhotoUpload.delete_all(user_id=actor.id)            # bookkeeping only; Listing.photo_url
+                                                             # is already a snapshot, unaffected
+        PhoneVerification.delete_all(user_id=actor.id)      # OTP-attempt history only
+        AlertDelivery.delete_all(user_id=actor.id)          # recipient-only audit row; NOT
+                                                             # nullable, so delete not null
+        Listing.update_all(WHERE submitted_by=actor.id, SET submitted_by=null)
+        Listing.update_all(WHERE resolved_by=actor.id, SET resolved_by=null)
+        ReportBatch.update_all(WHERE submitted_by=actor.id, SET submitted_by=null)
+        StatusHistory.update_all(WHERE changed_by=actor.id, SET changed_by=null)
+        # all four update_all calls: never cascade-delete the parent row (BR-012) — other users
+        # or INV-002's own audit guarantee depend on the row surviving, only the identity is scrubbed
         User.delete(actor.id)
     commit transaction
 
